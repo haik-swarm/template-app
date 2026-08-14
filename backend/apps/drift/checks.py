@@ -11,6 +11,7 @@ backend. N/A is carried through and excluded from the denominator instead.
 """
 
 import os
+import re
 import time
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -28,6 +29,19 @@ CheckState = Union[bool, str]
 P_MIN_MARKER_MTIME = 2145916800.0  # 2038-01-01 UTC
 
 P_MARKER_REL = os.path.join("frontend", "src", ".no-serve-mode")
+
+# `unset PYTHONPATH` (alone or alongside PYTHONHOME/VIRTUAL_ENV) clears the variable for every
+# later command, which protects pip and uvicorn just as well as per-invocation `env -u`.
+P_UNSET_PP_RE = re.compile(r"^\s*unset\s+[^\n#]*\bPYTHONPATH\b", re.M)
+
+# A pip probe against the venv interpreter proves the venv is usable, whether it lives in a helper
+# or is written inline as `"$VENV_PY" -m pip --version`.
+P_PIP_PROBE_RE = re.compile(r"-m\s+pip\s+(--version|-V)\b")
+
+# The line that actually launches the server. It is the strictest signal for PYTHONPATH: a script
+# can strip the variable for pip and still hand a poisoned environment to uvicorn, which is the
+# invocation that decides which fastapi/typeguard the app imports for the rest of its life.
+P_UVICORN_LINE_RE = re.compile(r"^.*-m\s+uvicorn\b.*$", re.M)
 
 
 @typechecked
@@ -61,12 +75,19 @@ def check_ensurepip_guard(ws: str) -> Tuple[CheckState, str]:
 
     The bundled interpreter ships without `ensurepip`, so `python3 -m venv` yields a venv with no
     pip and the install dies on "No module named pip". A version check alone accepts it.
+
+    Graded on behavior, not spelling: probing `ensurepip` and switching to `uv venv` are different
+    solutions to the same problem, and uv arguably the better one since it never needs pip in the
+    base interpreter at all. Matching only this template's wording would report a working app as
+    broken, and an auto-fix built on that would overwrite a fix that already works.
     """
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
     if sh is None:
         return P_NA, "no backend/run.sh — backend not enabled for this app"
     if "ensurepip" in sh:
         return True, "run.sh probes ensurepip before accepting an interpreter"
+    if "uv venv" in sh:
+        return True, "run.sh builds the venv with uv, which does not need ensurepip in the base interpreter"
     return False, "run.sh accepts any python3, including the bundled one that cannot create a venv"
 
 
@@ -81,8 +102,12 @@ def check_venv_health_gate(ws: str) -> Tuple[CheckState, str]:
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
     if sh is None:
         return P_NA, "no backend/run.sh — backend not enabled for this app"
-    if "venv_healthy" in sh:
+    # Any real pip probe counts, whether it is wrapped in a helper named venv_healthy or written
+    # inline as `"$VENV_PY" -m pip --version`. The behavior is what protects the boot, not the name.
+    if "venv_healthy" in sh or P_PIP_PROBE_RE.search(sh):
         return True, "sentinel is corroborated by a pip probe, and an unusable venv is rebuilt"
+    if "uv venv --clear" in sh:
+        return True, "venv is rebuilt from scratch with uv --clear rather than trusting a stale sentinel"
     return False, "a stale sentinel over a hollow venv is trusted forever with no way to self-heal"
 
 
@@ -97,9 +122,21 @@ def check_pythonpath_stripped(ws: str) -> Tuple[CheckState, str]:
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
     if sh is None:
         return P_NA, "no backend/run.sh — backend not enabled for this app"
-    if "env -u PYTHONPATH" in sh:
-        return True, "pip and uvicorn both run with PYTHONPATH stripped"
-    return False, "the bundle's site-packages shadows the venv; installs silently no-op"
+    # `unset PYTHONPATH` near the top is the same fix with wider blast radius: it clears the
+    # variable for every later command, so no individual invocation needs its own guard.
+    if P_UNSET_PP_RE.search(sh):
+        return True, "PYTHONPATH is unset for the whole script, so the venv resolves its own packages"
+    # Otherwise the protection is per-invocation, and the launch line is the one that must have it.
+    # Grading on "env -u PYTHONPATH appears somewhere" passes a script that shields pip and then
+    # hands uvicorn the poisoned environment anyway — the failure this check exists to catch.
+    launch = P_UVICORN_LINE_RE.search(sh)
+    if launch is None:
+        return False, "no uvicorn launch line found; cannot confirm the server starts with a clean environment"
+    if "env -u PYTHONPATH" not in launch.group(0):
+        return False, "uvicorn is launched with the bundle's PYTHONPATH still set; it imports the bundle's packages, not the venv's"
+    if "env -u PYTHONPATH" not in sh.replace(launch.group(0), ""):
+        return False, "uvicorn is protected but pip is not; installs into the venv still silently no-op"
+    return True, "pip and uvicorn both run with PYTHONPATH stripped"
 
 
 @typechecked

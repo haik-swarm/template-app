@@ -2,6 +2,9 @@
 // from first paint, even while React + the app are still mounting. The app fills
 // it in by calling window.OPENSWARM_APP.register(...) on mount.
 import './agentBridge';
+// Tailwind, scoped to .tool-ui-scope. The vendored ToolUI components carry Tailwind class names
+// and render as unstyled markup without it; VendoredToolUi applies the scope class itself.
+import './toolui/toolui.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import Main from './app/Main';
