@@ -1,8 +1,9 @@
 from backend.config.Apps import MainApp
 from backend.apps.health.health import health
+from backend.apps.drift.drift import drift
 from fastapi.middleware.cors import CORSMiddleware
 
-main_app = MainApp([health])
+main_app = MainApp([health, drift])
 app = main_app.app
 
 # Add CORS middleware - allow all origins for development

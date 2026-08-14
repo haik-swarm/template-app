@@ -18,6 +18,16 @@ FRONTEND_DIR_ABSPATH="$(dirname "$RUN_FRONTEND_ABSPATH")"
 
 cd "$FRONTEND_DIR_ABSPATH"
 
+# src/.no-serve-mode defeats serve-mode by staying permanently newer than any
+# dist build (rationale is inside the file itself). Git records content, not
+# mtimes, so a clone lands it with a checkout-time mtime and the guard
+# silently stops working. Restamping on every boot makes the workaround
+# survive `git clone` rather than only surviving on the machine that made it.
+P_NO_SERVE="$FRONTEND_DIR_ABSPATH/src/.no-serve-mode"
+if [[ -f "$P_NO_SERVE" ]]; then
+    touch -t 203801010000 "$P_NO_SERVE" 2>/dev/null || true
+fi
+
 # Put the bundled Node on PATH so `npm`, `node`, and the vite child
 # processes all resolve even on a machine with no system Node. The
 # packaged Electron shell exports OPENSWARM_NODE_PATH (e.g.

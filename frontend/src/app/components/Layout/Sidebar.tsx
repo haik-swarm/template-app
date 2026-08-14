@@ -9,6 +9,7 @@ import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import HomeIcon from '@mui/icons-material/Home';
 import FavoriteIcon from '@mui/icons-material/Favorite';
+import TroubleshootIcon from '@mui/icons-material/Troubleshoot';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
 import { NavLink, useLocation } from 'react-router-dom';
@@ -16,7 +17,8 @@ import { useClaudeTokens, useThemeMode } from '@/shared/styles/ThemeContext';
 import logoUrl from '@/assets/logo.png';
 
 const NAV_ITEMS = [
-  { path: '/', label: 'Home', icon: HomeIcon },
+  { path: '/', label: 'Reference', icon: HomeIcon },
+  { path: '/drift', label: 'Detect drift', icon: TroubleshootIcon },
   { path: '/health', label: 'Health', icon: FavoriteIcon },
 ];
 

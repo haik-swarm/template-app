@@ -6,6 +6,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import FavoriteIcon from '@mui/icons-material/Favorite';
 import CloudOffIcon from '@mui/icons-material/CloudOff';
 import { motion } from 'framer-motion';
+import AppShell from '@/app/components/Layout/AppShell';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 import { HEALTH_CHECK_URL } from '@/shared/state/API_ENDPOINTS';
 
@@ -61,6 +62,7 @@ const Health: React.FC = () => {
         : 'transparent';
 
   return (
+    <AppShell>
     <Box
       sx={{
         display: 'flex',
@@ -266,6 +268,7 @@ const Health: React.FC = () => {
         </Box>
       </motion.div>
     </Box>
+    </AppShell>
   );
 };
 

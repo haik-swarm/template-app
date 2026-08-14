@@ -12,7 +12,12 @@ const AppShell: React.FC<AppShellProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
-    <Box sx={{ display: 'flex', minHeight: '100vh' }}>
+    // A fixed height, not minHeight: with minHeight the flex container grows
+    // past the viewport as content does, so `overflow: auto` on <main> never
+    // has anything to clip and the page is instead cut off by the
+    // `body { overflow: hidden }` in index.html. Pinning to 100vh forces the
+    // overflow onto <main>, which is the thing meant to scroll.
+    <Box sx={{ display: 'flex', height: '100vh' }}>
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((prev) => !prev)} />
       <Box
         component="main"
