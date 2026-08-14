@@ -1,0 +1,29 @@
+# >>> openswarm-managed (edit in Git Graph → Global .gitignore) >>>
+# Global rules shared across every tracked OpenSwarm app.
+# Edit here to add or remove rules for all of them at once.
+
+.DS_Store
+Thumbs.db
+*.log
+*.log.
+
+node_modules/
+dist/
+build/
+.venv/
+__pycache__/
+*.pyc
+
+.env
+.env.local
+# <<< openswarm-managed <<<
+
+.DS_Store
+.env
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+.openswarm/

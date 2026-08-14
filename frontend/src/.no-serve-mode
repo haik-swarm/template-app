@@ -1,0 +1,14 @@
+Keeps this app on a real dev-server runtime instead of OpenSwarm's static
+serve-mode. Not imported by anything; only its mtime matters.
+
+Serve-mode (runtime.py:250) skips spawning any process when static_fresh()
+says frontend/dist is newer than every file under frontend/. That check is
+frontend-only, so an app with a FastAPI backend gets "restarted" into a
+bundle with no backend behind it. It also breaks restart.sh: the sentinel
+watcher ignores runtimes where `running` is False (runtime.py:653), and a
+process-less runtime is never running, so restart requests are never
+consumed and the script times out after 30s.
+
+This file is dated far in the future, so dist can never be newer than it
+and static_fresh() is always False. Deleting it re-enables serve-mode and
+brings both problems back.
