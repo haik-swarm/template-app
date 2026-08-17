@@ -364,28 +364,42 @@ const FixPreview: React.FC<{
   );
 };
 
-const Stat: React.FC<{ value: React.ReactNode; label: string; color: string }> = ({
-  value,
-  label,
-  color,
-}) => {
+/** Doubles as the variant filter: the counts are already the categories, so clicking one narrows
+ *  the list below rather than adding a second row of controls that repeats them. */
+const Stat: React.FC<{
+  value: React.ReactNode;
+  label: string;
+  color: string;
+  active?: boolean;
+  onClick?: () => void;
+}> = ({ value, label, color, active, onClick }) => {
   const c = useClaudeTokens();
   return (
     <Box
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      aria-pressed={onClick ? !!active : undefined}
       sx={{
         flex: 1,
         minWidth: 130,
-        bgcolor: c.bg.surface,
-        border: `1px solid ${c.border.subtle}`,
+        bgcolor: active ? `${color}14` : c.bg.surface,
+        border: `1px solid ${active ? color : c.border.subtle}`,
         borderRadius: `${c.radius.lg}px`,
         px: 2.5,
         py: 2,
+        cursor: onClick ? 'pointer' : 'default',
+        transition: c.transition,
+        '&:hover': onClick ? { borderColor: active ? color : `${color}66` } : undefined,
       }}
     >
       <Typography sx={{ fontSize: '1.9rem', fontWeight: 600, color, lineHeight: 1.1 }}>
         {value}
       </Typography>
-      <Typography sx={{ fontSize: '0.78rem', color: c.text.muted, mt: 0.5 }}>{label}</Typography>
+      <Typography
+        sx={{ fontSize: '0.78rem', color: active ? color : c.text.muted, mt: 0.5, fontWeight: active ? 600 : 400 }}
+      >
+        {label}
+      </Typography>
     </Box>
   );
 };
@@ -702,6 +716,9 @@ const Drift: React.FC = () => {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [copied, setCopied] = React.useState(false);
+  // null = show everything. Clicking the active tile clears it, so the filter has no separate
+  // "All" control to keep in sync with the counts.
+  const [filter, setFilter] = React.useState<Variant | null>(null);
 
   const runScan = React.useCallback(async () => {
     setLoading(true);
@@ -725,11 +742,16 @@ const Drift: React.FC = () => {
     }
   }, [runScan]);
 
+  const visible = React.useMemo(
+    () => (filter === null ? (data?.apps ?? []) : (data?.apps ?? []).filter((a) => a.variant === filter)),
+    [data, filter],
+  );
+
   // Reports the variant each app is in, and details only the mixed ones. Listing every failing
   // check made a settled Default app look broken when it is simply not Patched.
   const copyReport = () => {
     if (!data) return;
-    const lines = data.apps.map((a) => {
+    const lines = visible.map((a) => {
       const head = `${a.name} (${a.id}) — ${VARIANT_LABEL[a.variant]}`;
       if (a.variant !== 'mixed') return head;
       // Every graded check, each labelled with the variant it matches. Listing only the failures
@@ -742,7 +764,9 @@ const Drift: React.FC = () => {
     const v = data.variants;
     navigator.clipboard.writeText(
       `Drift scan — ${data.total} workspaces: ${v.patched} patched, ${v.default} default, ` +
-        `${v.mixed} mixed, ${v.unknown} unknown\n\n${lines.join('\n\n')}`,
+        `${v.mixed} mixed, ${v.unknown} unknown` +
+        (filter ? `\nFiltered to ${VARIANT_LABEL[filter]} (${lines.length})` : '') +
+        `\n\n${lines.join('\n\n')}`,
     );
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
@@ -847,13 +871,33 @@ const Drift: React.FC = () => {
           transition={{ duration: 0.35 }}
         >
           <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 3 }}>
-            <Stat value={data.total} label="workspaces scanned" color={c.text.primary} />
-            <Stat value={data.variants.patched} label="on Patched V1.7.6" color={c.status.success} />
-            <Stat value={data.variants.default} label="on Default V1.7.8-exp.8+" color={c.status.success} />
+            <Stat
+              value={data.total}
+              label="workspaces scanned"
+              color={c.text.primary}
+              active={filter === null}
+              onClick={() => setFilter(null)}
+            />
+            <Stat
+              value={data.variants.patched}
+              label="on Patched V1.7.6"
+              color={c.status.success}
+              active={filter === 'patched'}
+              onClick={() => setFilter((f) => (f === 'patched' ? null : 'patched'))}
+            />
+            <Stat
+              value={data.variants.default}
+              label="on Default V1.7.8-exp.8+"
+              color={c.status.success}
+              active={filter === 'default'}
+              onClick={() => setFilter((f) => (f === 'default' ? null : 'default'))}
+            />
             <Stat
               value={data.variants.mixed}
               label="mixed — neither variant"
               color={data.variants.mixed > 0 ? c.status.error : c.text.secondary}
+              active={filter === 'mixed'}
+              onClick={() => setFilter((f) => (f === 'mixed' ? null : 'mixed'))}
             />
             {/* Backendless apps land here and are a normal fifth of this install, so omitting the
                 tile left the four counts failing to add up to the total. */}
@@ -861,13 +905,20 @@ const Drift: React.FC = () => {
               value={data.variants.unknown}
               label="no backend to grade"
               color={c.text.secondary}
+              active={filter === 'unknown'}
+              onClick={() => setFilter((f) => (f === 'unknown' ? null : 'unknown'))}
             />
           </Box>
 
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-            {data.apps.map((app) => (
+            {visible.map((app) => (
               <AppCard key={app.id} app={app} onFixed={runScan} />
             ))}
+            {visible.length === 0 && (
+              <Typography sx={{ fontSize: '0.88rem', color: c.text.muted, py: 4, textAlign: 'center' }}>
+                No workspaces on {VARIANT_LABEL[filter!]}.
+              </Typography>
+            )}
           </Box>
 
           <Typography

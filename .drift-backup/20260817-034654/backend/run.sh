@@ -35,24 +35,39 @@ esac
 # Windows machine with no system Python still works). Fall back to PATH
 # probing for dev. `python` is first on Windows since python3.x aliases
 # usually don't exist there.
+# A candidate is only usable if it can actually BUILD a venv, which means
+# importing ensurepip. The bundled interpreter ships without ensurepip, so
+# `python3 -m venv` leaves a hollow venv with no pip and the install below
+# dies on "No module named pip". Version-checking alone accepts it.
+py_usable() {
+    [[ -n "$1" ]] || return 1
+    "$1" -c "import sys; sys.exit(0 if sys.version_info[0]==3 else 1)" &>/dev/null || return 1
+    "$1" -c "import ensurepip" &>/dev/null || return 1
+    return 0
+}
+
 PYTHON=""
-if [[ -n "${OPENSWARM_PYTHON:-}" ]] && "${OPENSWARM_PYTHON}" -c "import sys; sys.exit(0 if sys.version_info[0]==3 else 1)" &>/dev/null; then
+if py_usable "${OPENSWARM_PYTHON:-}"; then
     PYTHON="${OPENSWARM_PYTHON}"
 else
+    if [[ -n "${OPENSWARM_PYTHON:-}" ]]; then
+        echo "Note: OPENSWARM_PYTHON cannot create a venv (no ensurepip); probing PATH instead."
+    fi
     if [[ "$IS_WIN" == "1" ]]; then
         CANDIDATES="python python3 python3.13 python3.12 python3.11 python3.10"
     else
         CANDIDATES="python3.13 python3.12 python3.11 python3.10 python3 python"
     fi
     for candidate in $CANDIDATES; do
-        if command -v "$candidate" &>/dev/null && "$candidate" -c "import sys; sys.exit(0 if sys.version_info[0]==3 else 1)" &>/dev/null; then
+        if command -v "$candidate" &>/dev/null && py_usable "$candidate"; then
             PYTHON="$candidate"
             break
         fi
     done
 fi
 if [[ -z "$PYTHON" ]]; then
-    echo "Error: No working Python 3 found."
+    echo "Error: No Python 3 capable of creating a virtual environment was found."
+    echo "       (candidates must provide 'ensurepip'; the bundled interpreter does not)"
     exit 1
 fi
 echo "Using Python: $PYTHON ($("$PYTHON" --version 2>&1))"
@@ -77,23 +92,50 @@ fi
 # sentinel gets touched at the end of the install block; if any step
 # failed we never wrote it, so the next run takes the slow path again
 # and retries.
-if [[ -d "$VENV_DIR" && -f "$SENTINEL" ]]; then
+# OpenSwarm exports a PYTHONPATH pointing at the app bundle's own
+# site-packages. That leaks bundle copies of fastapi/typeguard/etc into this
+# venv and shadows what's actually installed here, so pip "succeeds" while
+# silently no-opping deps. Everything below runs the venv python clean.
+venv_py() { env -u PYTHONPATH "$VENV_PY" "$@"; }
+
+# A venv is only trustworthy if its interpreter exists AND has pip. A venv
+# built by an ensurepip-less interpreter satisfies `-d $VENV_DIR` but can
+# never install anything, so the directory check alone is not enough.
+venv_healthy() {
+    [[ -x "$VENV_PY" ]] || return 1
+    venv_py -m pip --version &>/dev/null || return 1
+    return 0
+}
+
+if [[ -f "$SENTINEL" ]] && venv_healthy; then
     echo "Dependencies already installed — skipping venv create + pip install."
 else
+    # Drop a venv that exists but is unusable (e.g. copied in from a warm
+    # cache that was built without pip); otherwise the install below fails
+    # on every boot with no way to self-heal.
+    if [[ -d "$VENV_DIR" ]] && ! venv_healthy; then
+        echo "Existing .venv has no usable pip — rebuilding it from scratch."
+        rm -rf "$VENV_DIR"
+    fi
+
     if [[ ! -d "$VENV_DIR" ]]; then
         echo "Creating virtual environment..."
-        "$PYTHON" -m venv "$VENV_DIR"
-        if [[ $? -ne 0 ]]; then
+        if ! "$PYTHON" -m venv "$VENV_DIR"; then
             echo "Error: Failed to create virtual environment."
+            rm -rf "$VENV_DIR"
             exit 1
         fi
+    fi
+
+    if ! venv_healthy; then
+        echo "Error: virtual environment was created without pip."
+        exit 1
     fi
 
     # --- Install Python dependencies ---
     echo "Installing dependencies..."
     cd "$BACKEND_DIR_ABSPATH"
-    "$VENV_PY" -m pip install -e .
-    if [[ $? -ne 0 ]]; then
+    if ! venv_py -m pip install -e .; then
         echo "Error: Failed to install Python dependencies."
         exit 1
     fi
@@ -110,8 +152,8 @@ fi
 # clean SIGTERM and restarts via this same script.
 # swarm-debug gates output on per-file toggles that default OFF; force all ON each boot so agent-added files show in the Terminal.
 if [[ "$IS_WIN" == "1" ]]; then SWARM_DEBUG_BIN="$VENV_DIR/Scripts/swarm-debug.exe"; else SWARM_DEBUG_BIN="$VENV_DIR/bin/swarm-debug"; fi
-( cd "$BACKEND_DIR_ABSPATH/.." && "$SWARM_DEBUG_BIN" toggle on --all >/dev/null 2>&1 ) || true
+( cd "$BACKEND_DIR_ABSPATH/.." && env -u PYTHONPATH "$SWARM_DEBUG_BIN" toggle on --all >/dev/null 2>&1 ) || true
 
 echo "Starting backend server on http://0.0.0.0:${BACKEND_PORT:-8324} ..."
 cd "$BACKEND_DIR_ABSPATH/.."
-"$VENV_PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "${BACKEND_PORT:-8324}"
+exec env -u PYTHONPATH "$VENV_PY" -m uvicorn backend.main:app --host 0.0.0.0 --port "${BACKEND_PORT:-8324}"
