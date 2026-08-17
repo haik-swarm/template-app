@@ -249,4 +249,41 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
         "failed": failed,
         "applicable": applicable,
         "passed": applicable - failed,
+        "variant": p_variant(results),
+        # Shared checks that FAIL. Both variants pass these, so failing one means this workspace
+        # predates both on that dimension — it is not a variant difference and converting sideways
+        # will never address it. Surfaced separately because p_variant deliberately ignores these
+        # when deciding, and silently ignoring a real failure is how Style Guide Extractor read as
+        # a clean Terminal app while missing a fix neither variant goes without.
+        "shared_missing": [
+            r["id"] for r in results if r["id"] in P_VARIANT_BLIND and r["state"] == "fail"
+        ],
     }
+
+
+# Checks both variants satisfy identically, so they say nothing about which one you are looking at.
+# Grading a workspace on them is what made a clean Terminal tree read as "2/6 drifted" — it scores
+# two out of six precisely because these two pass everywhere, including in the variant that fails
+# every check that actually discriminates. Kept here rather than imported from fixers to avoid a
+# cycle; fixers imports this module.
+P_VARIANT_BLIND = {"httpx_declared", "cache_populated_gate"}
+
+
+@typechecked
+def p_variant(results: List[Dict[str, object]]) -> str:
+    """Which of the two variants this workspace is in, or 'mixed' / 'unknown'.
+
+    There is no correct variant. A workspace is in one, the other, in between, or in neither, and
+    only the in-between case is a problem worth a user's attention: it means a swap was half
+    applied and the tree is in a state neither variant's author ever wrote. Reporting "N/6 passing"
+    instead framed one variant as correct and the other as damage, which it is not.
+    """
+    deciding = [r for r in results if r["id"] not in P_VARIANT_BLIND and r["state"] != P_NA]
+    if not deciding:
+        return "unknown"
+    passed = sum(1 for r in deciding if r["state"] == "pass")
+    if passed == len(deciding):
+        return "template"
+    if passed == 0:
+        return "terminal"
+    return "mixed"

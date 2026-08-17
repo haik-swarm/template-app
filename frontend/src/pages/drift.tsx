@@ -5,7 +5,6 @@ import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import Collapse from '@mui/material/Collapse';
 import CircularProgress from '@mui/material/CircularProgress';
-import LinearProgress from '@mui/material/LinearProgress';
 import Tooltip from '@mui/material/Tooltip';
 import Dialog from '@mui/material/Dialog';
 import DialogContent from '@mui/material/DialogContent';
@@ -34,6 +33,12 @@ interface Check {
   detail: string;
 }
 
+/** Neither template nor terminal is the correct one. `mixed` is the only state that is wrong. */
+type Variant = 'template' | 'terminal' | 'mixed' | 'unknown';
+
+/** "harden" converts a workspace to the template variant; "revert" converts it to terminal. */
+type Direction = 'harden' | 'revert';
+
 interface AppRow {
   id: string;
   name: string;
@@ -43,14 +48,16 @@ interface AppRow {
   failed: number;
   applicable: number;
   passed: number;
+  variant: Variant;
+  /** Ids of checks BOTH variants pass that this workspace fails; converting sideways won't fix. */
+  shared_missing: string[];
   checks: Check[];
 }
 
 interface ScanResult {
   root: string;
   total: number;
-  clean: number;
-  drifted: number;
+  variants: Record<Variant, number>;
   checks: { id: string; label: string; severity: string; fix: string }[];
   apps: AppRow[];
 }
@@ -62,12 +69,14 @@ interface FixFile {
   old_text: string;
   new_text: string;
   created: boolean;
+  deleted: boolean;
 }
 
 interface FixResult {
   applied: boolean;
   dry_run?: boolean;
   app_id: string;
+  direction: Direction;
   files: FixFile[];
   targets: string[];
   skipped: { id: string; reason: string }[];
@@ -78,24 +87,39 @@ interface FixResult {
   after?: { passed: number; applicable: number };
 }
 
+/** One place to name the two variants, so the page never invents a second vocabulary for them. */
+const VARIANT_LABEL: Record<Variant, string> = {
+  template: 'Template',
+  terminal: 'Terminal',
+  mixed: 'Mixed',
+  unknown: 'Unknown',
+};
+
+const DIRECTION_TARGET: Record<Direction, Variant> = {
+  harden: 'template',
+  revert: 'terminal',
+};
+
 /** Preview + confirm. The dialog only ever shows a server-computed plan, never a guess made here. */
 const FixPreview: React.FC<{
   app: AppRow;
+  direction: Direction;
   onClose: () => void;
   onApplied: () => void;
-}> = ({ app, onClose, onApplied }) => {
+}> = ({ app, direction, onClose, onApplied }) => {
   const c = useClaudeTokens();
   const [plan, setPlan] = React.useState<FixResult | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [done, setDone] = React.useState<FixResult | null>(null);
+  const target = VARIANT_LABEL[DIRECTION_TARGET[direction]];
 
   const post = React.useCallback(async (dryRun: boolean): Promise<FixResult> => {
     const res = await fetch(DRIFT_FIX_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: app.id, dry_run: dryRun }),
+      body: JSON.stringify({ app_id: app.id, dry_run: dryRun, direction }),
     });
     const body = await res.json();
     // 422 is the syntax gate refusing to write, which carries a useful payload rather than an
@@ -104,7 +128,7 @@ const FixPreview: React.FC<{
       throw new Error(body?.detail || `request failed (${res.status})`);
     }
     return body as FixResult;
-  }, [app.id]);
+  }, [app.id, direction]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -159,7 +183,7 @@ const FixPreview: React.FC<{
       >
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography sx={{ fontSize: '1.1rem', fontWeight: 600, color: c.text.primary }}>
-            {done?.applied ? 'Applied to' : 'Preview fix for'} {app.name}
+            {done?.applied ? 'Converted' : 'Convert'} {app.name} to {target}
           </Typography>
           <Typography sx={{ fontSize: '0.75rem', color: c.text.ghost, fontFamily: c.font.mono }}>
             {app.path}
@@ -207,8 +231,7 @@ const FixPreview: React.FC<{
         {done?.applied && (
           <Box sx={{ p: 2, borderRadius: `${c.radius.md}px`, bgcolor: c.status.successBg, mb: 2 }}>
             <Typography sx={{ color: c.status.success, fontSize: '0.88rem', fontWeight: 600 }}>
-              {done.before?.passed}/{done.before?.applicable} → {done.after?.passed}/
-              {done.after?.applicable} checks passing.
+              Now on the {target} variant.
             </Typography>
             <Typography sx={{ color: c.text.secondary, fontSize: '0.78rem', mt: 0.5, lineHeight: 1.55 }}>
               Originals saved to <code>{done.backup}</code> inside the workspace. The backend picks
@@ -218,9 +241,27 @@ const FixPreview: React.FC<{
           </Box>
         )}
 
+        {/* Shared checks produce no edit in either direction. Silence here reads as the tool
+            forgetting them, so the reason the server gave is shown rather than swallowed. */}
+        {(done ?? plan)?.skipped?.length ? (
+          <Box sx={{ p: 2, borderRadius: `${c.radius.md}px`, bgcolor: `${c.text.primary}08`, mb: 2 }}>
+            {(done ?? plan)!.skipped.map((s) => (
+              <Typography
+                key={s.id}
+                sx={{ color: c.text.muted, fontSize: '0.76rem', lineHeight: 1.6 }}
+              >
+                <Box component="span" sx={{ fontFamily: c.font.mono, color: c.text.secondary }}>
+                  {s.id}
+                </Box>{' '}
+                — {s.reason}
+              </Typography>
+            ))}
+          </Box>
+        ) : null}
+
         {!loading && files.length === 0 && !blocked?.length && (
           <Typography sx={{ color: c.text.muted, fontSize: '0.88rem', py: 3 }}>
-            {plan?.reason ?? 'Nothing to change here.'}
+            {plan?.reason ?? `Already on the ${target} variant; nothing to change.`}
           </Typography>
         )}
 
@@ -233,17 +274,17 @@ const FixPreview: React.FC<{
                 >
                   {f.path}
                 </Typography>
-                {f.created && (
+                {(f.created || f.deleted) && (
                   <Chip
-                    label="new file"
+                    label={f.deleted ? 'deleted' : 'new file'}
                     size="small"
                     sx={{
                       height: 17,
                       fontSize: '0.6rem',
                       fontWeight: 700,
                       textTransform: 'uppercase',
-                      bgcolor: `${c.status.success}25`,
-                      color: c.status.success,
+                      bgcolor: f.deleted ? `${c.status.error}25` : `${c.status.success}25`,
+                      color: f.deleted ? c.status.error : c.status.success,
                     }}
                   />
                 )}
@@ -298,7 +339,9 @@ const FixPreview: React.FC<{
               '&.Mui-disabled': { bgcolor: `${c.text.primary}12`, color: c.text.ghost },
             }}
           >
-            {applying ? 'Applying…' : `Apply to ${files.length} file${files.length === 1 ? '' : 's'}`}
+            {applying
+              ? 'Converting…'
+              : `Convert to ${target} (${files.length} file${files.length === 1 ? '' : 's'})`}
           </Button>
         )}
       </DialogActions>
@@ -335,12 +378,21 @@ const Stat: React.FC<{ value: React.ReactNode; label: string; color: string }> =
 const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed }) => {
   const c = useClaudeTokens();
   const [open, setOpen] = React.useState(false);
-  const [previewing, setPreviewing] = React.useState(false);
-  const clean = app.failed === 0;
+  const [previewing, setPreviewing] = React.useState<Direction | null>(null);
+  // Only `mixed` is a problem. Both settled variants are fine places for a workspace to be, so the
+  // card colours off "is it in one of them" rather than off a passing count that treats the
+  // template as correct and everything else as damage.
+  const settled = app.variant === 'template' || app.variant === 'terminal';
   // Denominator is the applicable checks, not all six: a frontend-only app is graded on what
   // actually applies to it rather than being credited for checks that never ran.
   const total = app.applicable;
   const passed = app.passed;
+  const variantColor =
+    app.variant === 'mixed'
+      ? c.status.error
+      : app.variant === 'unknown'
+        ? c.text.muted
+        : c.status.success;
 
   return (
     <Box
@@ -364,10 +416,10 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           '&:hover': { bgcolor: `${c.text.primary}05` },
         }}
       >
-        {clean ? (
+        {settled ? (
           <CheckCircleIcon sx={{ fontSize: 20, color: c.status.success }} />
         ) : (
-          <CancelIcon sx={{ fontSize: 20, color: c.status.error }} />
+          <CancelIcon sx={{ fontSize: 20, color: variantColor }} />
         )}
 
         <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -409,55 +461,87 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
                 }}
               />
             )}
+            {/* Neither variant is missing these, so no conversion reaches them. Without this the
+                app reads as a settled variant while lacking a fix both variants carry. */}
+            {app.shared_missing.length > 0 && (
+              <Tooltip
+                title={`Fails ${app.shared_missing.join(', ')}, which both variants pass. Converting will not fix this.`}
+              >
+                <Chip
+                  label={`${app.shared_missing.length} behind both`}
+                  size="small"
+                  sx={{
+                    height: 19,
+                    fontSize: '0.65rem',
+                    fontWeight: 600,
+                    bgcolor: `${c.status.error}1A`,
+                    color: c.status.error,
+                  }}
+                />
+              </Tooltip>
+            )}
           </Box>
           <Typography sx={{ fontSize: '0.72rem', color: c.text.ghost, fontFamily: c.font.mono }}>
             {app.id}
           </Typography>
         </Box>
 
-        <Box sx={{ width: 90, flexShrink: 0 }}>
-          <LinearProgress
-            variant="determinate"
-            value={total === 0 ? 0 : (passed / total) * 100}
-            sx={{
-              height: 5,
-              borderRadius: 999,
-              bgcolor: `${c.text.primary}12`,
-              '& .MuiLinearProgress-bar': {
-                bgcolor: clean ? c.status.success : c.status.error,
-                borderRadius: 999,
-              },
-            }}
-          />
-          <Typography sx={{ fontSize: '0.68rem', color: c.text.muted, mt: 0.5, textAlign: 'right' }}>
-            {passed}/{total} passing
+        <Box sx={{ width: 104, flexShrink: 0 }}>
+          <Typography
+            sx={{ fontSize: '0.8rem', fontWeight: 600, color: variantColor, textAlign: 'right' }}
+          >
+            {VARIANT_LABEL[app.variant]}
+          </Typography>
+          <Typography sx={{ fontSize: '0.68rem', color: c.text.ghost, textAlign: 'right' }}>
+            {app.variant === 'mixed'
+              ? `${passed}/${total} — neither variant`
+              : app.variant === 'unknown'
+                ? 'nothing to grade'
+                : 'variant'}
           </Typography>
         </Box>
 
-        {!clean && (
-          <Tooltip title="Preview the exact patch before anything is written">
-            <Button
-              onClick={(e) => {
-                e.stopPropagation();
-                setPreviewing(true);
-              }}
-              startIcon={<AutoFixHighIcon sx={{ fontSize: 15 }} />}
-              size="small"
-              sx={{
-                textTransform: 'none',
-                borderRadius: 999,
-                flexShrink: 0,
-                px: 1.5,
-                fontSize: '0.78rem',
-                color: c.accent.primary,
-                border: `1px solid ${c.accent.primary}40`,
-                '&:hover': { bgcolor: `${c.accent.primary}12`, borderColor: c.accent.primary },
-              }}
-            >
-              Fix
-            </Button>
-          </Tooltip>
-        )}
+        {/* Both directions are always offered, and the one the workspace is already in is disabled
+            rather than hidden. A Template app previously showed no button at all, which made the
+            template look like the only destination when it is just the one it happens to be in. */}
+        <Box sx={{ display: 'flex', gap: 0.75, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+          {(['harden', 'revert'] as Direction[]).map((dir) => {
+            const dest = DIRECTION_TARGET[dir];
+            const here = app.variant === dest;
+            return (
+              <Tooltip
+                key={dir}
+                title={
+                  here
+                    ? `Already on ${VARIANT_LABEL[dest]}`
+                    : `Preview the exact patch that converts this app to ${VARIANT_LABEL[dest]}`
+                }
+              >
+                {/* span so the tooltip still fires while the button is disabled */}
+                <Box component="span">
+                  <Button
+                    onClick={() => setPreviewing(dir)}
+                    disabled={here}
+                    startIcon={<AutoFixHighIcon sx={{ fontSize: 15 }} />}
+                    size="small"
+                    sx={{
+                      textTransform: 'none',
+                      borderRadius: 999,
+                      px: 1.5,
+                      fontSize: '0.78rem',
+                      color: c.accent.primary,
+                      border: `1px solid ${c.accent.primary}40`,
+                      '&:hover': { bgcolor: `${c.accent.primary}12`, borderColor: c.accent.primary },
+                      '&.Mui-disabled': { color: c.text.ghost, borderColor: c.border.subtle },
+                    }}
+                  >
+                    {VARIANT_LABEL[dest]}
+                  </Button>
+                </Box>
+              </Tooltip>
+            );
+          })}
+        </Box>
 
         <ExpandMoreIcon
           sx={{
@@ -470,7 +554,12 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
       </Box>
 
       {previewing && (
-        <FixPreview app={app} onClose={() => setPreviewing(false)} onApplied={onFixed} />
+        <FixPreview
+          app={app}
+          direction={previewing}
+          onClose={() => setPreviewing(null)}
+          onApplied={onFixed}
+        />
       )}
 
       <Collapse in={open} unmountOnExit>
@@ -591,20 +680,22 @@ const Drift: React.FC = () => {
     }
   }, [runScan]);
 
+  // Reports the variant each app is in, and details only the mixed ones. Listing every failing
+  // check made a settled Terminal app look broken when it is simply not the template.
   const copyReport = () => {
     if (!data) return;
-    const lines = data.apps
-      .filter((a) => a.failed > 0)
-      .map(
-        (a) =>
-          `${a.name} (${a.id}) — ${a.failed} failing\n` +
-          a.checks
-            .filter((k) => k.state === 'fail')
-            .map((k) => `    [${k.severity}] ${k.label}: ${k.detail}`)
-            .join('\n'),
-      );
+    const lines = data.apps.map((a) => {
+      const head = `${a.name} (${a.id}) — ${VARIANT_LABEL[a.variant]}`;
+      if (a.variant !== 'mixed') return head;
+      return `${head}\n${a.checks
+        .filter((k) => k.state === 'fail')
+        .map((k) => `    [${k.severity}] ${k.label}: ${k.detail}`)
+        .join('\n')}`;
+    });
+    const v = data.variants;
     navigator.clipboard.writeText(
-      `Drift scan — ${data.drifted}/${data.total} workspaces drifted\n\n${lines.join('\n\n')}`,
+      `Drift scan — ${data.total} workspaces: ${v.template} template, ${v.terminal} terminal, ` +
+        `${v.mixed} mixed, ${v.unknown} unknown\n\n${lines.join('\n\n')}`,
     );
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
@@ -635,9 +726,10 @@ const Drift: React.FC = () => {
             Detect drift
           </Typography>
           <Typography sx={{ fontSize: '0.92rem', color: c.text.muted, mt: 0.75, maxWidth: 620 }}>
-            Grades every app workspace in this OpenSwarm install against the six fixes this template
-            carries. Read-only: it reads text files and stats one marker, and never runs or modifies
-            anything belonging to another app.
+            Sorts every app workspace in this install into one of two variants. Neither is more
+            correct than the other, and you can convert an app either way; only <em>Mixed</em> is a
+            problem, because a half-applied swap sits in neither. Read-only until you apply: the
+            scan reads text files and stats one marker, and never runs anything.
           </Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 1 }}>
@@ -709,12 +801,12 @@ const Drift: React.FC = () => {
         >
           <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 3 }}>
             <Stat value={data.total} label="workspaces scanned" color={c.text.primary} />
-            <Stat value={data.clean} label="fully configured" color={c.status.success} />
-            <Stat value={data.drifted} label="drifted" color={c.status.error} />
+            <Stat value={data.variants.template} label="on Template" color={c.status.success} />
+            <Stat value={data.variants.terminal} label="on Terminal" color={c.status.success} />
             <Stat
-              value={data.apps.reduce((n, a) => n + a.failed, 0)}
-              label="failing checks total"
-              color={c.text.secondary}
+              value={data.variants.mixed}
+              label="mixed — neither variant"
+              color={data.variants.mixed > 0 ? c.status.error : c.text.secondary}
             />
           </Box>
 

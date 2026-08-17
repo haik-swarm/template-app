@@ -26,7 +26,7 @@ from swarm_debug import debug
 
 from backend.config.Apps import SubApp
 from backend.apps.drift.checks import P_CHECKS, p_grade_workspace
-from backend.apps.drift.fixers import P_FIXERS, p_plan
+from backend.apps.drift.fixers import p_plan
 
 
 @asynccontextmanager
@@ -94,11 +94,20 @@ def p_scan() -> List[Dict[str, Any]]:
             "failed": graded["failed"],
             "applicable": graded["applicable"],
             "passed": graded["passed"],
+            "variant": graded["variant"],
+            "shared_missing": graded["shared_missing"],
             "checks": graded["checks"],
         })
 
-    # Worst first: the point of the page is triage, not a directory listing.
-    apps.sort(key=lambda a: (-int(a["failed"]), str(a["name"]).lower()))
+    # Mixed first, then anything missing a shared fix: those are the two states that are actually
+    # wrong, and converting sideways addresses neither. Sorting by failure count instead put every
+    # settled Terminal app at the top as though it needed rescuing, burying both real cases.
+    order = {"mixed": 0, "unknown": 1, "terminal": 2, "template": 2}
+    apps.sort(key=lambda a: (
+        order.get(str(a["variant"]), 3),
+        0 if a["shared_missing"] else 1,
+        str(a["name"]).lower(),
+    ))
     return apps
 
 
@@ -108,13 +117,14 @@ def p_scan() -> List[Dict[str, Any]]:
 @typechecked
 async def scan() -> JSONResponse:
     apps = p_scan()
-    clean = sum(1 for a in apps if a["failed"] == 0)
-    debug(f"drift scan: {len(apps)} workspaces, {clean} clean")
+    counts = {"template": 0, "terminal": 0, "mixed": 0, "unknown": 0}
+    for a in apps:
+        counts[str(a["variant"])] = counts.get(str(a["variant"]), 0) + 1
+    debug(f"drift scan: {len(apps)} workspaces, {counts}")
     return JSONResponse({
         "root": P_WORKSPACE_ROOT,
         "total": len(apps),
-        "clean": clean,
-        "drifted": len(apps) - clean,
+        "variants": counts,
         "checks": [
             {"id": c["id"], "label": c["label"], "severity": c["severity"], "fix": c["fix"]}
             for c in P_CHECKS
@@ -127,8 +137,11 @@ async def scan() -> JSONResponse:
 
 class FixRequest(BaseModel):
     app_id: str
-    check_ids: Optional[List[str]] = None  # None means "every failing check"
+    check_ids: Optional[List[str]] = None  # None means "every check on the wrong side of direction"
     dry_run: bool = True
+    # "harden" applies this template's fixes; "revert" puts the stock scripts back. Defaulting to
+    # harden means a client that never sends the field keeps its exact previous behavior.
+    direction: str = "harden"
 
 
 @typechecked
@@ -197,24 +210,35 @@ def p_toml_parses(text: str) -> Optional[str]:
 @drift.router.post("/fix")
 @typechecked
 async def fix(req: FixRequest) -> JSONResponse:
+    if req.direction not in ("harden", "revert"):
+        raise HTTPException(status_code=400, detail="direction must be 'harden' or 'revert'")
     ws = p_resolve_workspace(req.app_id)
 
     graded = p_grade_workspace(ws)
-    failing = [c["id"] for c in graded["checks"] if c["state"] == "fail"]
-    requested = req.check_ids if req.check_ids is not None else failing
+    # Hardening acts on what fails; reverting acts on what passes. A check that is N/A here has no
+    # file to edit in either direction, so it is eligible for neither.
+    wanted_state = "fail" if req.direction == "harden" else "pass"
+    eligible = [c["id"] for c in graded["checks"] if c["state"] == wanted_state]
+    requested = req.check_ids if req.check_ids is not None else eligible
 
-    unknown = [cid for cid in requested if cid not in P_FIXERS]
+    # Validate against every known check, not against the direction's table: a shared check like
+    # httpx_declared has no reverter, but asking to revert it is a no-op to report, not a 400.
+    known = {c["id"] for c in P_CHECKS}
+    unknown = [cid for cid in requested if cid not in known]
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown check ids: {', '.join(unknown)}")
-    # Silently ignoring an already-passing check would report a fix that never happened.
-    targets = [cid for cid in requested if cid in failing]
+    # Silently ignoring a check that is already on the requested side would report work that never
+    # happened, so intersect rather than trusting the caller's list.
+    targets = [cid for cid in requested if cid in eligible]
 
-    plan = p_plan(ws, targets)
+    plan = p_plan(ws, targets, req.direction)
     edits = plan["edits"]
 
     blocked: List[Dict[str, str]] = []
     for edit in edits:
-        if edit.language == "bash":
+        if edit.delete:
+            problem = None  # nothing to parse; the file is going away
+        elif edit.language == "bash":
             problem = p_shell_parses(edit.new_text)
         elif edit.language == "toml":
             problem = p_toml_parses(edit.new_text)
@@ -241,7 +265,8 @@ async def fix(req: FixRequest) -> JSONResponse:
             "note": e.note,
             "old_text": e.old_text,
             "new_text": e.new_text,
-            "created": e.old_text == "",
+            "created": e.old_text == "" and not e.delete,
+            "deleted": e.delete,
         }
         for e in edits
     ]
@@ -251,6 +276,7 @@ async def fix(req: FixRequest) -> JSONResponse:
             "applied": False,
             "dry_run": True,
             "app_id": req.app_id,
+            "direction": req.direction,
             "files": files,
             "targets": targets,
             "skipped": plan["skipped"],
@@ -260,6 +286,7 @@ async def fix(req: FixRequest) -> JSONResponse:
         return JSONResponse({
             "applied": False,
             "app_id": req.app_id,
+            "direction": req.direction,
             "files": [],
             "targets": targets,
             "skipped": plan["skipped"],
@@ -280,6 +307,12 @@ async def fix(req: FixRequest) -> JSONResponse:
                 shutil.copy2(src, dst)
         for e in edits:
             dest = os.path.join(ws, e.rel_path)
+            if e.delete:
+                # Backed up above, so the rollback path can put it back like any other edit.
+                if os.path.exists(dest):
+                    os.unlink(dest)
+                written.append(e.rel_path)
+                continue
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(e.new_text)
@@ -299,10 +332,11 @@ async def fix(req: FixRequest) -> JSONResponse:
         raise HTTPException(status_code=500, detail=f"write failed, rolled back: {exc}")
 
     after = p_grade_workspace(ws)
-    debug(f"drift fix {req.app_id}: {graded['passed']}/{graded['applicable']} -> {after['passed']}/{after['applicable']}")
+    debug(f"drift {req.direction} {req.app_id}: {graded['passed']}/{graded['applicable']} -> {after['passed']}/{after['applicable']}")
     return JSONResponse({
         "applied": True,
         "app_id": req.app_id,
+        "direction": req.direction,
         "files": files,
         "targets": targets,
         "skipped": plan["skipped"],
