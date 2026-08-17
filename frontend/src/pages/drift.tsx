@@ -26,7 +26,7 @@ import { DRIFT_SCAN_URL, DRIFT_FIX_URL } from '@/shared/state/API_ENDPOINTS';
 
 /** Which variant this one check's file matches. `neither` is the only value that is a defect: it
  *  means the file matches no variant's spelling, not that it is on the other side. */
-type Side = 'template' | 'terminal' | 'neither' | 'na';
+type Side = 'patched' | 'default' | 'neither' | 'na';
 
 interface Check {
   id: string;
@@ -38,10 +38,10 @@ interface Check {
   detail: string;
 }
 
-/** Neither template nor terminal is the correct one. `mixed` is the only state that is wrong. */
-type Variant = 'template' | 'terminal' | 'mixed' | 'unknown';
+/** Neither Patched nor Default is the correct one. `mixed` is the only state that is wrong. */
+type Variant = 'patched' | 'default' | 'mixed' | 'unknown';
 
-/** "harden" converts a workspace to the template variant; "revert" converts it to terminal. */
+/** "harden" converts a workspace to the Patched variant; "revert" converts it to Default. */
 type Direction = 'harden' | 'revert';
 
 interface AppRow {
@@ -94,23 +94,23 @@ interface FixResult {
 
 /** One place to name the two variants, so the page never invents a second vocabulary for them. */
 const VARIANT_LABEL: Record<Variant, string> = {
-  template: 'Template',
-  terminal: 'Terminal',
+  patched: 'Patched V1.7.6',
+  default: 'Default V1.7.8-exp.8+',
   mixed: 'Mixed',
   unknown: 'Unknown',
 };
 
 const DIRECTION_TARGET: Record<Direction, Variant> = {
-  harden: 'template',
-  revert: 'terminal',
+  harden: 'patched',
+  revert: 'default',
 };
 
-/** How one check row reads. Keyed on `side`, never on pass/fail: a row that matches Terminal is
+/** How one check row reads. Keyed on `side`, never on pass/fail: a row that matches Default is
  *  reporting which variant this file is written in, and colouring that red said the user's own
  *  deliberate conversion was damage. Only `neither` — matching no variant at all — is a defect. */
 const SIDE_ROW: Record<Side, { label: string; tone: 'good' | 'bad' | 'quiet' }> = {
-  template: { label: 'Template', tone: 'good' },
-  terminal: { label: 'Terminal', tone: 'good' },
+  patched: { label: 'Patched V1.7.6', tone: 'good' },
+  default: { label: 'Default V1.7.8-exp.8+', tone: 'good' },
   neither: { label: 'Neither', tone: 'bad' },
   na: { label: 'n/a', tone: 'quiet' },
 };
@@ -395,13 +395,13 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
   const [open, setOpen] = React.useState(false);
   const [previewing, setPreviewing] = React.useState<Direction | null>(null);
   // Only `mixed` is a problem. Both settled variants are fine places for a workspace to be, so the
-  // card colours off "is it in one of them" rather than off a passing count that treats the
-  // template as correct and everything else as damage.
-  const settled = app.variant === 'template' || app.variant === 'terminal';
+  // card colours off "is it in one of them" rather than off a passing count that treats
+  // Patched as correct and everything else as damage.
+  const settled = app.variant === 'patched' || app.variant === 'default';
   // A mixed app is described by how its checks split across the two variants, not by a passing
   // count: "3/6 passing" implies six were meant to pass, which is only true of one of the variants.
   const graded = app.checks.filter((k) => k.side !== 'na').length;
-  const onTemplate = app.checks.filter((k) => k.side === 'template').length;
+  const onPatched = app.checks.filter((k) => k.side === 'patched').length;
   const variantColor =
     app.variant === 'mixed'
       ? c.status.error
@@ -513,7 +513,7 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           </Typography>
           <Typography sx={{ fontSize: '0.68rem', color: c.text.ghost, textAlign: 'right' }}>
             {app.variant === 'mixed'
-              ? `${onTemplate}/${graded} template-side`
+              ? `${onPatched}/${graded} patched-side`
               : app.variant === 'unknown'
                 ? 'no backend to grade'
                 : 'variant'}
@@ -521,8 +521,8 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
         </Box>
 
         {/* Both directions are always offered, and the one the workspace is already in is disabled
-            rather than hidden. A Template app previously showed no button at all, which made the
-            template look like the only destination when it is just the one it happens to be in. */}
+            rather than hidden. A Patched app previously showed no button at all, which made the
+            Patched look like the only destination when it is just the one it happens to be in. */}
         <Box sx={{ display: 'flex', gap: 0.75, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
           {(['harden', 'revert'] as Direction[]).map((dir) => {
             const dest = DIRECTION_TARGET[dir];
@@ -625,7 +625,7 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
                       {chk.label}
                     </Typography>
                     {/* Names the variant this file is written in. Without it the icon alone is the
-                        ambiguity the page had before: green meant "template" but read as "correct". */}
+                        ambiguity the page had before: green meant "patched" but read as "correct". */}
                     <Tooltip
                       title={
                         chk.side === 'neither'
@@ -669,7 +669,7 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
                   >
                     {chk.detail}
                   </Typography>
-                  {/* Only shown for `neither`. A Terminal-side row is not waiting to be fixed; it is
+                  {/* Only shown for `neither`. A Default-side row is not waiting to be fixed; it is
                       already somewhere, and telling the user how to leave it is not a repair. */}
                   {chk.side === 'neither' && (
                     <Typography
@@ -726,7 +726,7 @@ const Drift: React.FC = () => {
   }, [runScan]);
 
   // Reports the variant each app is in, and details only the mixed ones. Listing every failing
-  // check made a settled Terminal app look broken when it is simply not the template.
+  // check made a settled Default app look broken when it is simply not Patched.
   const copyReport = () => {
     if (!data) return;
     const lines = data.apps.map((a) => {
@@ -741,7 +741,7 @@ const Drift: React.FC = () => {
     });
     const v = data.variants;
     navigator.clipboard.writeText(
-      `Drift scan — ${data.total} workspaces: ${v.template} template, ${v.terminal} terminal, ` +
+      `Drift scan — ${data.total} workspaces: ${v.patched} patched, ${v.default} default, ` +
         `${v.mixed} mixed, ${v.unknown} unknown\n\n${lines.join('\n\n')}`,
     );
     setCopied(true);
@@ -848,8 +848,8 @@ const Drift: React.FC = () => {
         >
           <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', mb: 3 }}>
             <Stat value={data.total} label="workspaces scanned" color={c.text.primary} />
-            <Stat value={data.variants.template} label="on Template" color={c.status.success} />
-            <Stat value={data.variants.terminal} label="on Terminal" color={c.status.success} />
+            <Stat value={data.variants.patched} label="on Patched V1.7.6" color={c.status.success} />
+            <Stat value={data.variants.default} label="on Default V1.7.8-exp.8+" color={c.status.success} />
             <Stat
               value={data.variants.mixed}
               label="mixed — neither variant"

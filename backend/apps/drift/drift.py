@@ -101,8 +101,8 @@ def p_scan() -> List[Dict[str, Any]]:
 
     # Mixed first, then anything missing a shared fix: those are the two states that are actually
     # wrong, and converting sideways addresses neither. Sorting by failure count instead put every
-    # settled Terminal app at the top as though it needed rescuing, burying both real cases.
-    order = {"mixed": 0, "unknown": 1, "terminal": 2, "template": 2}
+    # settled Default app at the top as though it needed rescuing, burying both real cases.
+    order = {"mixed": 0, "unknown": 1, "default": 2, "patched": 2}
     apps.sort(key=lambda a: (
         order.get(str(a["variant"]), 3),
         0 if a["shared_missing"] else 1,
@@ -117,7 +117,7 @@ def p_scan() -> List[Dict[str, Any]]:
 @typechecked
 async def scan() -> JSONResponse:
     apps = p_scan()
-    counts = {"template": 0, "terminal": 0, "mixed": 0, "unknown": 0}
+    counts = {"patched": 0, "default": 0, "mixed": 0, "unknown": 0}
     for a in apps:
         counts[str(a["variant"])] = counts.get(str(a["variant"]), 0) + 1
     debug(f"drift scan: {len(apps)} workspaces, {counts}")
@@ -139,7 +139,7 @@ class FixRequest(BaseModel):
     app_id: str
     check_ids: Optional[List[str]] = None  # None means "every check on the wrong side of direction"
     dry_run: bool = True
-    # "harden" applies this template's fixes; "revert" puts the stock scripts back. Defaulting to
+    # "harden" applies the Patched fixes; "revert" puts the stock scripts back. Defaulting to
     # harden means a client that never sends the field keeps its exact previous behavior.
     direction: str = "harden"
 

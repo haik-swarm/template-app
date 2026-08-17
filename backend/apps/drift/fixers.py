@@ -438,8 +438,8 @@ P_FIXERS: Dict[str, Callable[[str], Optional[Edit]]] = {
 # ############################### reverters: hardened -> stock ###############################
 #
 # The mirror image of the fixers above, and they exist because "is this workspace hardened?" is a
-# question you can only really answer by seeing the same app both ways. Terminal boots fine on the
-# stock scripts; the template's are strictly better but different, and a one-way tool cannot show
+# question you can only really answer by seeing the same app both ways. Default boots fine on the
+# stock scripts; Patched's are strictly better but different, and a one-way tool cannot show
 # you the difference or undo a push you regret.
 #
 # Every reverter obeys the same two rules as its fixer, for the same reasons. Idempotent: returns
@@ -516,21 +516,21 @@ def p_drop(text: str, block: str) -> Optional[str]:
 
 # ############################### httpx: shared, not swappable ###############################
 #
-# There is deliberately no httpx reverter. Both variants declare it explicitly — Terminal lists it
-# in [project].dependencies just as the template does — so "the Terminal version of this check" and
-# "the template version" are the same file content, and a swap between them is a no-op.
+# There is deliberately no httpx reverter. Both variants declare it explicitly — Default lists it
+# in [project].dependencies just as Patched does — so "the Default version of this check" and
+# "the Patched version" are the same file content, and a swap between them is a no-op.
 #
 # An earlier draft reverted this to stock (undeclared) on the theory that revert always means
-# "back to the original". The round-trip harness caught it immediately: reverting Terminal stripped
-# an httpx line Terminal's author wrote on purpose and left the workspace one check WORSE than it
-# started. Stock is not the other side of this swap; Terminal is, and Terminal already agrees.
+# "back to the original". The round-trip harness caught it immediately: reverting Default stripped
+# an httpx line Default's author wrote on purpose and left the workspace one check WORSE than it
+# started. Stock is not the other side of this swap; Default is, and Default already agrees.
 #
 # cache_populated_gate is here for the same reason, found the same way. check_cache_populated_gate
 # asks one question — is the warm cache gated on a completion marker rather than a bare `-d` test —
-# and both variants answer yes: Terminal with an inline `.populated` test, the template with
+# and both variants answer yes: Default with an inline `.populated` test, Patched with
 # cache_usable(). Neither is the fail state, so "the other side of the swap" does not exist and a
 # reverter can only rewrite working code into differently-working code. Reverting one into the
-# other also silently dropped the template's extra `-x .../bin/python` probe, a real behavioural
+# other also silently dropped Patched's extra `-x .../bin/python` probe, a real behavioural
 # change this check never asked for and does not measure.
 P_SHARED_CHECKS = {"httpx_declared", "cache_populated_gate"}
 
@@ -675,8 +675,8 @@ P_HARDENED_DEBUG_RE = re.compile(r'&& env -u PYTHONPATH ("\$SWARM_DEBUG_BIN" tog
 # written the second way passed the check, so the harden button was disabled, while revert found no
 # anchor and produced an empty plan: permanently `mixed`, with no button able to move it.
 #
-# Removing it is correct rather than aggressive: Terminal's run.sh contains no PYTHONPATH handling
-# of any kind, so this block is not "already Terminal", it is the template's protection under a
+# Removing it is correct rather than aggressive: Default's run.sh contains no PYTHONPATH handling
+# of any kind, so this block is not "already Default", it is Patched's protection under a
 # different name. The comment lines immediately above are swept with it because they exist only to
 # explain it; a blank line terminates the sweep, which is what protects an unrelated comment.
 P_UNSET_PP_BLOCK_RE = re.compile(

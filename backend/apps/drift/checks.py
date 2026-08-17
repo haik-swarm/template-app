@@ -57,48 +57,48 @@ def p_read(path: str) -> Optional[str]:
 # ############################### which variant is this side ###############################
 #
 # A failing check answers "this workspace lacks the protection". It does NOT answer "this workspace
-# is the Terminal variant", and conflating the two is what made the page incoherent: converting to
-# Terminal turned four rows red with messages like "trusted forever with no way to self-heal" while
+# is the Default variant", and conflating the two is what made the page incoherent: converting to
+# Default turned four rows red with messages like "trusted forever with no way to self-heal" while
 # the header announced the conversion had succeeded.
 #
-# So each deciding check gets a second, POSITIVE detector for Terminal's own spelling. Terminal is
-# recognised by what it contains, not by failing to be the template, which means a workspace that is
+# So each deciding check gets a second, POSITIVE detector for Default's own spelling. Default is
+# recognised by what it contains, not by failing to be Patched, which means a workspace that is
 # neither — a half-applied swap, or something older than both — stays distinguishable from one that
 # is deliberately on the other side.
 #
-# Each deciding check also carries a `terminal_detail`: what Terminal's spelling IS, stated flatly.
+# Each deciding check also carries a `default_detail`: what Default's spelling IS, stated flatly.
 # The failure strings below are bug reports, and rightly so for a workspace that is behind both, but
 # handing one to a user who just deliberately converted describes their choice as damage.
 P_VERSION_PROBE = "sys.version_info[0]==3"
-P_TERMINAL_SENTINEL_RE = re.compile(r'if \[\[ -d "\$VENV_DIR" && -f "\$SENTINEL" \]\]; then')
+P_DEFAULT_SENTINEL_RE = re.compile(r'if \[\[ -d "\$VENV_DIR" && -f "\$SENTINEL" \]\]; then')
 P_BARE_UVICORN_RE = re.compile(r'^\s*"\$VENV_PY" -m uvicorn\b', re.M)
 
 
 @typechecked
 def side_ensurepip_guard(ws: str) -> bool:
-    """Terminal picks an interpreter on a bare `version_info[0]==3` probe and nothing more."""
+    """Default picks an interpreter on a bare `version_info[0]==3` probe and nothing more."""
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
     return sh is not None and P_VERSION_PROBE in sh
 
 
 @typechecked
 def side_venv_health_gate(ws: str) -> bool:
-    """Terminal trusts `-d $VENV_DIR && -f $SENTINEL` with no pip probe behind it."""
+    """Default trusts `-d $VENV_DIR && -f $SENTINEL` with no pip probe behind it."""
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
-    return sh is not None and bool(P_TERMINAL_SENTINEL_RE.search(sh))
+    return sh is not None and bool(P_DEFAULT_SENTINEL_RE.search(sh))
 
 
 @typechecked
 def side_pythonpath_stripped(ws: str) -> bool:
-    """Terminal launches uvicorn straight off "$VENV_PY", inherited PYTHONPATH intact."""
+    """Default launches uvicorn straight off "$VENV_PY", inherited PYTHONPATH intact."""
     sh = p_read(os.path.join(ws, "backend", "run.sh"))
     return sh is not None and bool(P_BARE_UVICORN_RE.search(sh))
 
 
 @typechecked
 def side_serve_mode_marker(ws: str) -> bool:
-    """Terminal has no marker at all. A marker with a stale mtime is neither variant: that is what
-    a git clone leaves behind, which is a broken template rather than a deliberate choice."""
+    """Default has no marker at all. A marker with a stale mtime is neither variant: that is what
+    a git clone leaves behind, which is a broken Patched rather than a deliberate choice."""
     return not os.path.isfile(os.path.join(ws, P_MARKER_REL))
 
 
@@ -236,13 +236,13 @@ P_CHECKS: List[Dict[str, object]] = [
     },
     {
         "id": "ensurepip_guard",
-        # Labels on the four deciding checks name the DIMENSION, not the template's answer to it.
+        # Labels on the four deciding checks name the DIMENSION, not Patched's answer to it.
         # "run.sh rejects interpreters without ensurepip" is a claim, and rendering it beside a chip
-        # reading Terminal put an assertion next to its own contradiction.
+        # reading Default put an assertion next to its own contradiction.
         "label": "interpreter selection in run.sh",
         "fn": check_ensurepip_guard,
         "side": side_ensurepip_guard,
-        "terminal_detail": "run.sh selects an interpreter on a bare `version_info[0]==3` probe, which is Terminal's spelling",
+        "default_detail": "run.sh selects an interpreter on a bare `version_info[0]==3` probe, which is Default V1.7.8-exp.8+'s spelling",
         "severity": "high",
         "fix": "Add a py_usable() helper that probes `import ensurepip`, and select the interpreter through it.",
     },
@@ -251,7 +251,7 @@ P_CHECKS: List[Dict[str, object]] = [
         "label": "install-skip sentinel in run.sh",
         "fn": check_venv_health_gate,
         "side": side_venv_health_gate,
-        "terminal_detail": "run.sh skips the install on `-d $VENV_DIR && -f $SENTINEL` alone, which is Terminal's spelling",
+        "default_detail": "run.sh skips the install on `-d $VENV_DIR && -f $SENTINEL` alone, which is Default V1.7.8-exp.8+'s spelling",
         "severity": "high",
         "fix": "Add venv_healthy() (interpreter exists AND `-m pip --version` works); require it alongside the sentinel and rm -rf the venv when it fails.",
     },
@@ -260,7 +260,7 @@ P_CHECKS: List[Dict[str, object]] = [
         "label": "PYTHONPATH handling for pip and uvicorn",
         "fn": check_pythonpath_stripped,
         "side": side_pythonpath_stripped,
-        "terminal_detail": "run.sh launches uvicorn straight off \"$VENV_PY\" with PYTHONPATH inherited, which is Terminal's spelling",
+        "default_detail": "run.sh launches uvicorn straight off \"$VENV_PY\" with PYTHONPATH inherited, which is Default V1.7.8-exp.8+'s spelling",
         "severity": "high",
         "fix": "Run every venv invocation through `env -u PYTHONPATH`, including the final exec of uvicorn.",
     },
@@ -276,7 +276,7 @@ P_CHECKS: List[Dict[str, object]] = [
         "label": "serve-mode marker",
         "fn": check_serve_mode_marker,
         "side": side_serve_mode_marker,
-        "terminal_detail": "no serve-mode marker, so OpenSwarm's static serve-mode stays available, which is Terminal's spelling",
+        "default_detail": "no serve-mode marker, so OpenSwarm's static serve-mode stays available, which is Default V1.7.8-exp.8+'s spelling",
         "severity": "high",
         "fix": "Create frontend/src/.no-serve-mode, then `touch -t 203801010000` it.",
     },
@@ -293,29 +293,29 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
             state, detail = fn(ws)
         except Exception as exc:  # a scan must degrade, not abort
             state, detail = False, f"check raised: {exc}"
-        # Three-way, and the third value is the point. "template" means this workspace has the
-        # protection; "terminal" means it positively matches Terminal's own spelling; "neither"
-        # means it has no protection AND does not look like Terminal either, i.e. it is genuinely
+        # Three-way, and the third value is the point. "patched" means this workspace has the
+        # protection; "default" means it positively matches Default's own spelling; "neither"
+        # means it has no protection AND does not look like Default either, i.e. it is genuinely
         # behind rather than deliberately on the other side. Only "neither" is a defect.
         side_fn: Optional[Callable[[str], bool]] = spec.get("side")  # type: ignore[assignment]
         if state == P_NA:
             side = P_NA
         elif state:
-            side = "template"
+            side = "patched"
         elif side_fn is None:
             # A shared check has no other side to be on: both variants implement it identically,
-            # so failing it cannot mean "Terminal-flavoured" and can only mean behind both.
+            # so failing it cannot mean "Default-flavoured" and can only mean behind both.
             side = "neither"
         else:
             try:
-                side = "terminal" if side_fn(ws) else "neither"
+                side = "default" if side_fn(ws) else "neither"
             except Exception:
                 side = "neither"
         # `detail` is written as a bug report, which is right for a workspace that is behind both and
-        # wrong for one deliberately sitting in Terminal. Swap in the neutral description of what
-        # Terminal's spelling IS, so a converted app is described rather than accused.
-        if side == "terminal":
-            detail = str(spec.get("terminal_detail") or detail)
+        # wrong for one deliberately sitting in Default. Swap in the neutral description of what
+        # Default's spelling IS, so a converted app is described rather than accused.
+        if side == "default":
+            detail = str(spec.get("default_detail") or detail)
         results.append({
             "id": spec["id"],
             "label": spec["label"],
@@ -337,7 +337,7 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
         # predates both on that dimension — it is not a variant difference and converting sideways
         # will never address it. Surfaced separately because p_variant deliberately ignores these
         # when deciding, and silently ignoring a real failure is how Style Guide Extractor read as
-        # a clean Terminal app while missing a fix neither variant goes without.
+        # a clean Default app while missing a fix neither variant goes without.
         "shared_missing": [
             r["id"] for r in results if r["id"] in P_VARIANT_BLIND and r["state"] == "fail"
         ],
@@ -345,7 +345,7 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
 
 
 # Checks both variants satisfy identically, so they say nothing about which one you are looking at.
-# Grading a workspace on them is what made a clean Terminal tree read as "2/6 drifted" — it scores
+# Grading a workspace on them is what made a clean Default tree read as "2/6 drifted" — it scores
 # two out of six precisely because these two pass everywhere, including in the variant that fails
 # every check that actually discriminates. Kept here rather than imported from fixers to avoid a
 # cycle; fixers imports this module.
@@ -355,8 +355,8 @@ P_VARIANT_BLIND = {"httpx_declared", "cache_populated_gate"}
 # serve_mode_marker as the only gradable one — and a variant named off that single bit is wrong
 # twice over. It is one signal, and for a frontend-only app it is not even a signal: the marker
 # exists to stop an app WITH a backend being parked in a static bundle, so its absence there is the
-# correct state rather than Terminal's spelling. That is how a frontend-only app reported as a
-# settled Terminal workspace while having no backend to hold either variant's scripts.
+# correct state rather than Default's spelling. That is how a frontend-only app reported as a
+# settled Default workspace while having no backend to hold either variant's scripts.
 P_BACKEND_DECIDING = {"ensurepip_guard", "venv_health_gate", "pythonpath_stripped"}
 
 
@@ -369,10 +369,10 @@ def p_variant(results: List[Dict[str, object]]) -> str:
     applied and the tree is in a state neither variant's author ever wrote. Reporting "N/6 passing"
     instead framed one variant as correct and the other as damage, which it is not.
 
-    Decided on `side`, not on pass/fail. Reading a failure as "therefore Terminal" is what let a
+    Decided on `side`, not on pass/fail. Reading a failure as "therefore Default" is what let a
     workspace that is merely behind both — a git clone whose marker lost its mtime, a tree older
-    than either variant — report as a settled Terminal app. A check now has to positively look like
-    Terminal to count as Terminal, and a file matching neither spelling is by definition a file
+    than either variant — report as a settled Default app. A check now has to positively look like
+    Default to count as Default, and a file matching neither spelling is by definition a file
     neither author wrote, which is the same thing a half-applied swap produces: mixed, not settled.
 
     'unknown' is reserved for having nothing to go on at all (a frontend-only app), so it stays a
@@ -389,8 +389,8 @@ def p_variant(results: List[Dict[str, object]]) -> str:
     ]
     if not sides:
         return "unknown"
-    if all(s == "template" for s in sides):
-        return "template"
-    if all(s == "terminal" for s in sides):
-        return "terminal"
+    if all(s == "patched" for s in sides):
+        return "patched"
+    if all(s == "default" for s in sides):
+        return "default"
     return "mixed"

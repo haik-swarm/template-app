@@ -16,8 +16,8 @@ interface Decision {
   id: string;
   title: string;
   where: string;
-  template: string;
-  terminal: string;
+  patched: string;
+  default: string;
   why: string;
 }
 
@@ -34,39 +34,39 @@ const DECISIONS: Decision[] = [
     id: 'ensurepip',
     title: 'How run.sh picks an interpreter',
     where: 'backend/run.sh',
-    template:
+    patched:
       'py_usable() probes `import ensurepip` as well as the version, so an interpreter that cannot produce a working venv is rejected and the PATH probe continues to the next candidate.',
-    terminal:
+    default:
       'A bare `sys.version_info[0]==3` probe. Anything calling itself Python 3 is accepted, and that is the whole test.',
-    why: 'The host hands run.sh its own interpreter via OPENSWARM_PYTHON, and the packaged build ships that interpreter without ensurepip. Under Terminal it is accepted, `python3 -m venv` half-succeeds, and the install that follows has no pip to run. Template spends an extra subprocess to find that out first.',
+    why: 'The host hands run.sh its own interpreter via OPENSWARM_PYTHON, and the packaged build ships that interpreter without ensurepip. Under Default V1.7.8-exp.8+ it is accepted, `python3 -m venv` half-succeeds, and the install that follows has no pip to run. Patched V1.7.6 spends an extra subprocess to find that out first.',
   },
   {
     id: 'sentinel',
     title: 'What the install-skip sentinel is trusted to mean',
     where: 'backend/run.sh',
-    template:
+    patched:
       'venv_healthy() requires the interpreter to exist AND `-m pip --version` to succeed. The sentinel is only honoured alongside it, and a venv that fails the probe is deleted and rebuilt.',
-    terminal:
+    default:
       '`if [[ -d "$VENV_DIR" && -f "$SENTINEL" ]]` and nothing behind it. The file existing is proof enough to skip the venv-create and install block.',
-    why: 'The sentinel records "we installed once", not "the venv works". Pair a stale sentinel with a hollow venv and Terminal takes the fast path forever, with no route back to the slow path that would have repaired it. Template pays a pip probe on every boot to keep that route open.',
+    why: 'The sentinel records "we installed once", not "the venv works". Pair a stale sentinel with a hollow venv and Default V1.7.8-exp.8+ takes the fast path forever, with no route back to the slow path that would have repaired it. Patched V1.7.6 pays a pip probe on every boot to keep that route open.',
   },
   {
     id: 'pythonpath',
     title: 'Whether PYTHONPATH reaches pip and uvicorn',
     where: 'backend/run.sh',
-    template:
+    patched:
       'Every venv invocation, both pip and the final exec of uvicorn, runs through `env -u PYTHONPATH`, so the venv is the only thing on the import path.',
-    terminal:
+    default:
       'uvicorn is launched straight off `"$VENV_PY"`, with whatever PYTHONPATH the host exported still intact.',
-    why: 'OpenSwarm exports a PYTHONPATH pointing at the app bundle’s own site-packages, and it takes precedence over the venv. Under Terminal the venv looks fully populated to pip while being nearly empty on disk, and uvicorn imports the bundle’s fastapi and typeguard rather than the app’s. A third spelling also exists in the wild: a single `unset PYTHONPATH` near the top of the script, which clears the variable for every later command. The scanner grades that as satisfying this check, because behaviourally it does, but no direction button writes it, so an app carrying it sits on neither side of this decision.',
+    why: 'OpenSwarm exports a PYTHONPATH pointing at the app bundle’s own site-packages, and it takes precedence over the venv. Under Default V1.7.8-exp.8+ the venv looks fully populated to pip while being nearly empty on disk, and uvicorn imports the bundle’s fastapi and typeguard rather than the app’s. A third spelling also exists in the wild: a single `unset PYTHONPATH` near the top of the script, which clears the variable for every later command. The scanner grades that as satisfying this check, because behaviourally it does, but no direction button writes it, so an app carrying it sits on neither side of this decision.',
   },
   {
     id: 'servemode',
     title: 'Whether serve-mode can claim the app',
     where: 'frontend/src/.no-serve-mode',
-    template:
+    patched:
       'The marker exists and carries a far-future mtime (2038-01-01), so dist can never be newer than every source file, the freshness test is permanently false, and the app always gets a real dev-server runtime.',
-    terminal: 'No marker at all. Serve-mode is free to decide the bundle is fresh.',
+    default: 'No marker at all. Serve-mode is free to decide the bundle is fresh.',
     why: 'Serve-mode saves memory by serving frontend/dist statically instead of spawning vite, and decides freshness by comparing dist’s mtime against the newest file under frontend/. That comparison is frontend-only: it never asks whether a backend exists, so an app with a FastAPI backend gets restarted into a bundle with nothing serving /api. The same path deadlocks restart.sh, because the sentinel watcher skips runtimes whose process is not running, and a process-less runtime never is.',
   },
 ];
@@ -247,9 +247,10 @@ const Home: React.FC = () => {
             sx={{ fontSize: '1rem', color: c.text.secondary, mt: 2, lineHeight: 1.7, maxWidth: 660 }}
           >
             An OpenSwarm backend boots through four decision points, and at each one there are two
-            coherent answers. Template checks the expensive thing directly: it probes the
+            coherent answers. Patched V1.7.6 checks the expensive thing directly: it probes the
             interpreter, probes the venv, strips the environment per command, and pins the
-            serve-mode marker out of reach. Terminal takes the cheap proxy at each of those points
+            serve-mode marker out of reach. Default V1.7.8-exp.8+ takes the cheap proxy at each of
+            those points
             and boots faster for it.
           </Typography>
           <Typography
@@ -291,8 +292,8 @@ const Home: React.FC = () => {
               chip={{ text: 'decides variant', color: c.accent.primary }}
               index={i}
               sections={[
-                ['What Template writes', d.template],
-                ['What Terminal writes', d.terminal],
+                ['What Patched V1.7.6 writes', d.patched],
+                ['What Default V1.7.8-exp.8+ writes', d.default],
                 ['Why they differ', d.why],
               ]}
             />
@@ -333,11 +334,11 @@ const Home: React.FC = () => {
             will not boot under either spelling. A workspace cannot install a Python for itself.
           </Typography>
           <Typography sx={{ fontSize: '0.87rem', color: c.text.secondary, lineHeight: 1.65, mt: 1.5 }}>
-            Template&rsquo;s serve-mode marker depends on its own mtime, and git does not record
+            Patched V1.7.6&rsquo;s serve-mode marker depends on its own mtime, and git does not record
             mtimes. A clone receives a checkout-time mtime, which defeats the marker silently while
             leaving the file in place. Nothing restamps it automatically, so the drift page reads a
-            marker whose date has regressed as neither variant rather than as Template, and
-            converting to Template is what rewrites the timestamp.
+            marker whose date has regressed as neither variant rather than as Patched V1.7.6, and
+            converting to Patched V1.7.6 is what rewrites the timestamp.
           </Typography>
         </Box>
       </Box>
