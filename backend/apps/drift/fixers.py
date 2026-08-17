@@ -258,8 +258,17 @@ def fix_venv_health_gate(ws: str) -> Optional[Edit]:
     if not (P_FAST_PATH_RE.search(sh) and P_CREATE_BLOCK_RE.search(sh)):
         return None
     new = sh
-    if "venv_healthy" not in new:
-        new = P_FAST_PATH_RE.sub(lambda m: P_VENV_HELPERS + m.group(0), new, count=1)
+    # One guard per helper, each testing for its own definition. Testing only venv_healthy and
+    # then inserting the pair appended a second venv_py() to any file that already had one, and
+    # running the fixer again appended a third. Each helper is dropped independently on the way
+    # back, so it has to be added independently on the way out.
+    needed = ""
+    if "venv_py() {" not in new:
+        needed += P_VENV_PY_HELPER
+    if "venv_healthy() {" not in new:
+        needed += P_VENV_HEALTHY_HELPER
+    if needed:
+        new = P_FAST_PATH_RE.sub(lambda m: needed + m.group(0), new, count=1)
     new = P_FAST_PATH_RE.sub('if [[ -f "$SENTINEL" ]] && venv_healthy; then', new, count=1)
     new = P_CREATE_BLOCK_RE.sub(lambda m: P_SELF_HEAL + m.group(0), new, count=1)
     # The reverter undoes both of these, but nothing here ever applied them, so a hardened file
@@ -660,15 +669,34 @@ P_HARDENED_PIP_HELPER_RE = re.compile(
 )
 P_HARDENED_DEBUG_RE = re.compile(r'&& env -u PYTHONPATH ("\$SWARM_DEBUG_BIN" toggle on --all)')
 
+# The OTHER spelling of the same protection. check_pythonpath_stripped accepts two forms — a
+# per-invocation `env -u PYTHONPATH` on each call, and a single `unset PYTHONPATH` near the top that
+# covers every later command — but this reverter only knew how to undo the first. A workspace
+# written the second way passed the check, so the harden button was disabled, while revert found no
+# anchor and produced an empty plan: permanently `mixed`, with no button able to move it.
+#
+# Removing it is correct rather than aggressive: Terminal's run.sh contains no PYTHONPATH handling
+# of any kind, so this block is not "already Terminal", it is the template's protection under a
+# different name. The comment lines immediately above are swept with it because they exist only to
+# explain it; a blank line terminates the sweep, which is what protects an unrelated comment.
+P_UNSET_PP_BLOCK_RE = re.compile(
+    r'(?:^#[^\n]*\n)*^unset PYTHONPATH\n(?:^unset PYTHONHOME\n)?\n?',
+    re.M,
+)
+
+
 @typechecked
 def revert_pythonpath_stripped(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_pythonpath_stripped(ws)[0] is not True:
         return None
-    if not P_HARDENED_UVICORN_RE.search(sh):
+    # Either spelling is a valid anchor. Demanding the hardened uvicorn line alone is exactly what
+    # made the whole-script form unreachable.
+    if not P_HARDENED_UVICORN_RE.search(sh) and not P_UNSET_PP_BLOCK_RE.search(sh):
         return None
-    new = P_HARDENED_UVICORN_RE.sub(lambda m: f'{m.group(1)}{m.group(2)}', sh, count=1)
+    new = P_UNSET_PP_BLOCK_RE.sub('', sh, count=1)
+    new = P_HARDENED_UVICORN_RE.sub(lambda m: f'{m.group(1)}{m.group(2)}', new, count=1)
     new = P_HARDENED_PIP_RE.sub(lambda m: f'{m.group(1)}"$VENV_PY" -m pip install -e .', new, count=1)
     new = P_HARDENED_PIP_HELPER_RE.sub(
         lambda m: f'{m.group(1)}"$VENV_PY" -m pip install -e .\n'

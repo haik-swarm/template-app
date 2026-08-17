@@ -54,6 +54,54 @@ def p_read(path: str) -> Optional[str]:
         return None
 
 
+# ############################### which variant is this side ###############################
+#
+# A failing check answers "this workspace lacks the protection". It does NOT answer "this workspace
+# is the Terminal variant", and conflating the two is what made the page incoherent: converting to
+# Terminal turned four rows red with messages like "trusted forever with no way to self-heal" while
+# the header announced the conversion had succeeded.
+#
+# So each deciding check gets a second, POSITIVE detector for Terminal's own spelling. Terminal is
+# recognised by what it contains, not by failing to be the template, which means a workspace that is
+# neither — a half-applied swap, or something older than both — stays distinguishable from one that
+# is deliberately on the other side.
+#
+# Each deciding check also carries a `terminal_detail`: what Terminal's spelling IS, stated flatly.
+# The failure strings below are bug reports, and rightly so for a workspace that is behind both, but
+# handing one to a user who just deliberately converted describes their choice as damage.
+P_VERSION_PROBE = "sys.version_info[0]==3"
+P_TERMINAL_SENTINEL_RE = re.compile(r'if \[\[ -d "\$VENV_DIR" && -f "\$SENTINEL" \]\]; then')
+P_BARE_UVICORN_RE = re.compile(r'^\s*"\$VENV_PY" -m uvicorn\b', re.M)
+
+
+@typechecked
+def side_ensurepip_guard(ws: str) -> bool:
+    """Terminal picks an interpreter on a bare `version_info[0]==3` probe and nothing more."""
+    sh = p_read(os.path.join(ws, "backend", "run.sh"))
+    return sh is not None and P_VERSION_PROBE in sh
+
+
+@typechecked
+def side_venv_health_gate(ws: str) -> bool:
+    """Terminal trusts `-d $VENV_DIR && -f $SENTINEL` with no pip probe behind it."""
+    sh = p_read(os.path.join(ws, "backend", "run.sh"))
+    return sh is not None and bool(P_TERMINAL_SENTINEL_RE.search(sh))
+
+
+@typechecked
+def side_pythonpath_stripped(ws: str) -> bool:
+    """Terminal launches uvicorn straight off "$VENV_PY", inherited PYTHONPATH intact."""
+    sh = p_read(os.path.join(ws, "backend", "run.sh"))
+    return sh is not None and bool(P_BARE_UVICORN_RE.search(sh))
+
+
+@typechecked
+def side_serve_mode_marker(ws: str) -> bool:
+    """Terminal has no marker at all. A marker with a stale mtime is neither variant: that is what
+    a git clone leaves behind, which is a broken template rather than a deliberate choice."""
+    return not os.path.isfile(os.path.join(ws, P_MARKER_REL))
+
+
 @typechecked
 def check_httpx_declared(ws: str) -> Tuple[CheckState, str]:
     """`httpx` is imported by apps/openswarm_host but stock pyproject.toml never declares it.
@@ -188,22 +236,31 @@ P_CHECKS: List[Dict[str, object]] = [
     },
     {
         "id": "ensurepip_guard",
-        "label": "run.sh rejects interpreters without ensurepip",
+        # Labels on the four deciding checks name the DIMENSION, not the template's answer to it.
+        # "run.sh rejects interpreters without ensurepip" is a claim, and rendering it beside a chip
+        # reading Terminal put an assertion next to its own contradiction.
+        "label": "interpreter selection in run.sh",
         "fn": check_ensurepip_guard,
+        "side": side_ensurepip_guard,
+        "terminal_detail": "run.sh selects an interpreter on a bare `version_info[0]==3` probe, which is Terminal's spelling",
         "severity": "high",
         "fix": "Add a py_usable() helper that probes `import ensurepip`, and select the interpreter through it.",
     },
     {
         "id": "venv_health_gate",
-        "label": "venv health gate on the install sentinel",
+        "label": "install-skip sentinel in run.sh",
         "fn": check_venv_health_gate,
+        "side": side_venv_health_gate,
+        "terminal_detail": "run.sh skips the install on `-d $VENV_DIR && -f $SENTINEL` alone, which is Terminal's spelling",
         "severity": "high",
         "fix": "Add venv_healthy() (interpreter exists AND `-m pip --version` works); require it alongside the sentinel and rm -rf the venv when it fails.",
     },
     {
         "id": "pythonpath_stripped",
-        "label": "PYTHONPATH stripped for pip and uvicorn",
+        "label": "PYTHONPATH handling for pip and uvicorn",
         "fn": check_pythonpath_stripped,
+        "side": side_pythonpath_stripped,
+        "terminal_detail": "run.sh launches uvicorn straight off \"$VENV_PY\" with PYTHONPATH inherited, which is Terminal's spelling",
         "severity": "high",
         "fix": "Run every venv invocation through `env -u PYTHONPATH`, including the final exec of uvicorn.",
     },
@@ -216,8 +273,10 @@ P_CHECKS: List[Dict[str, object]] = [
     },
     {
         "id": "serve_mode_marker",
-        "label": "serve-mode marker present and far-future",
+        "label": "serve-mode marker",
         "fn": check_serve_mode_marker,
+        "side": side_serve_mode_marker,
+        "terminal_detail": "no serve-mode marker, so OpenSwarm's static serve-mode stays available, which is Terminal's spelling",
         "severity": "high",
         "fix": "Create frontend/src/.no-serve-mode, then `touch -t 203801010000` it.",
     },
@@ -234,12 +293,36 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
             state, detail = fn(ws)
         except Exception as exc:  # a scan must degrade, not abort
             state, detail = False, f"check raised: {exc}"
+        # Three-way, and the third value is the point. "template" means this workspace has the
+        # protection; "terminal" means it positively matches Terminal's own spelling; "neither"
+        # means it has no protection AND does not look like Terminal either, i.e. it is genuinely
+        # behind rather than deliberately on the other side. Only "neither" is a defect.
+        side_fn: Optional[Callable[[str], bool]] = spec.get("side")  # type: ignore[assignment]
+        if state == P_NA:
+            side = P_NA
+        elif state:
+            side = "template"
+        elif side_fn is None:
+            # A shared check has no other side to be on: both variants implement it identically,
+            # so failing it cannot mean "Terminal-flavoured" and can only mean behind both.
+            side = "neither"
+        else:
+            try:
+                side = "terminal" if side_fn(ws) else "neither"
+            except Exception:
+                side = "neither"
+        # `detail` is written as a bug report, which is right for a workspace that is behind both and
+        # wrong for one deliberately sitting in Terminal. Swap in the neutral description of what
+        # Terminal's spelling IS, so a converted app is described rather than accused.
+        if side == "terminal":
+            detail = str(spec.get("terminal_detail") or detail)
         results.append({
             "id": spec["id"],
             "label": spec["label"],
             "severity": spec["severity"],
             "fix": spec["fix"],
             "state": P_NA if state == P_NA else ("pass" if state else "fail"),
+            "side": side,
             "detail": detail,
         })
     failed = sum(1 for r in results if r["state"] == "fail")
@@ -268,6 +351,14 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
 # cycle; fixers imports this module.
 P_VARIANT_BLIND = {"httpx_declared", "cache_populated_gate"}
 
+# The deciding checks that read backend/run.sh. All three go N/A without a backend, which leaves
+# serve_mode_marker as the only gradable one — and a variant named off that single bit is wrong
+# twice over. It is one signal, and for a frontend-only app it is not even a signal: the marker
+# exists to stop an app WITH a backend being parked in a static bundle, so its absence there is the
+# correct state rather than Terminal's spelling. That is how a frontend-only app reported as a
+# settled Terminal workspace while having no backend to hold either variant's scripts.
+P_BACKEND_DECIDING = {"ensurepip_guard", "venv_health_gate", "pythonpath_stripped"}
+
 
 @typechecked
 def p_variant(results: List[Dict[str, object]]) -> str:
@@ -277,13 +368,29 @@ def p_variant(results: List[Dict[str, object]]) -> str:
     only the in-between case is a problem worth a user's attention: it means a swap was half
     applied and the tree is in a state neither variant's author ever wrote. Reporting "N/6 passing"
     instead framed one variant as correct and the other as damage, which it is not.
+
+    Decided on `side`, not on pass/fail. Reading a failure as "therefore Terminal" is what let a
+    workspace that is merely behind both — a git clone whose marker lost its mtime, a tree older
+    than either variant — report as a settled Terminal app. A check now has to positively look like
+    Terminal to count as Terminal, and a file matching neither spelling is by definition a file
+    neither author wrote, which is the same thing a half-applied swap produces: mixed, not settled.
+
+    'unknown' is reserved for having nothing to go on at all (a frontend-only app), so it stays a
+    shrug rather than doubling as a diagnosis.
     """
-    deciding = [r for r in results if r["id"] not in P_VARIANT_BLIND and r["state"] != P_NA]
-    if not deciding:
+    # No backend, no variant. The variants differ almost entirely in backend/run.sh, so an app
+    # without one is not in either and never was; saying so beats naming a variant off the single
+    # check that happens to still be gradable.
+    if not any(str(r["id"]) in P_BACKEND_DECIDING and r["side"] != P_NA for r in results):
         return "unknown"
-    passed = sum(1 for r in deciding if r["state"] == "pass")
-    if passed == len(deciding):
+    sides = [
+        str(r["side"]) for r in results
+        if r["id"] not in P_VARIANT_BLIND and r["side"] != P_NA
+    ]
+    if not sides:
+        return "unknown"
+    if all(s == "template" for s in sides):
         return "template"
-    if passed == 0:
+    if all(s == "terminal" for s in sides):
         return "terminal"
     return "mixed"

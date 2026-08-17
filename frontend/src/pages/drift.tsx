@@ -24,12 +24,17 @@ import VendoredToolUi from '@/toolui/VendoredToolUi';
 import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 import { DRIFT_SCAN_URL, DRIFT_FIX_URL } from '@/shared/state/API_ENDPOINTS';
 
+/** Which variant this one check's file matches. `neither` is the only value that is a defect: it
+ *  means the file matches no variant's spelling, not that it is on the other side. */
+type Side = 'template' | 'terminal' | 'neither' | 'na';
+
 interface Check {
   id: string;
   label: string;
   severity: 'high' | 'medium';
   fix: string;
   state: 'pass' | 'fail' | 'na';
+  side: Side;
   detail: string;
 }
 
@@ -98,6 +103,16 @@ const VARIANT_LABEL: Record<Variant, string> = {
 const DIRECTION_TARGET: Record<Direction, Variant> = {
   harden: 'template',
   revert: 'terminal',
+};
+
+/** How one check row reads. Keyed on `side`, never on pass/fail: a row that matches Terminal is
+ *  reporting which variant this file is written in, and colouring that red said the user's own
+ *  deliberate conversion was damage. Only `neither` — matching no variant at all — is a defect. */
+const SIDE_ROW: Record<Side, { label: string; tone: 'good' | 'bad' | 'quiet' }> = {
+  template: { label: 'Template', tone: 'good' },
+  terminal: { label: 'Terminal', tone: 'good' },
+  neither: { label: 'Neither', tone: 'bad' },
+  na: { label: 'n/a', tone: 'quiet' },
 };
 
 /** Preview + confirm. The dialog only ever shows a server-computed plan, never a guess made here. */
@@ -383,10 +398,10 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
   // card colours off "is it in one of them" rather than off a passing count that treats the
   // template as correct and everything else as damage.
   const settled = app.variant === 'template' || app.variant === 'terminal';
-  // Denominator is the applicable checks, not all six: a frontend-only app is graded on what
-  // actually applies to it rather than being credited for checks that never ran.
-  const total = app.applicable;
-  const passed = app.passed;
+  // A mixed app is described by how its checks split across the two variants, not by a passing
+  // count: "3/6 passing" implies six were meant to pass, which is only true of one of the variants.
+  const graded = app.checks.filter((k) => k.side !== 'na').length;
+  const onTemplate = app.checks.filter((k) => k.side === 'template').length;
   const variantColor =
     app.variant === 'mixed'
       ? c.status.error
@@ -416,10 +431,14 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           '&:hover': { bgcolor: `${c.text.primary}05` },
         }}
       >
+        {/* Only `mixed` earns the X. `unknown` means there was no backend to grade, which is a
+            shrug, not a failure, and a red cancel icon read as a broken app. */}
         {settled ? (
           <CheckCircleIcon sx={{ fontSize: 20, color: c.status.success }} />
-        ) : (
+        ) : app.variant === 'mixed' ? (
           <CancelIcon sx={{ fontSize: 20, color: variantColor }} />
+        ) : (
+          <RemoveCircleOutlineIcon sx={{ fontSize: 20, color: variantColor }} />
         )}
 
         <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -494,9 +513,9 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           </Typography>
           <Typography sx={{ fontSize: '0.68rem', color: c.text.ghost, textAlign: 'right' }}>
             {app.variant === 'mixed'
-              ? `${passed}/${total} — neither variant`
+              ? `${onTemplate}/${graded} template-side`
               : app.variant === 'unknown'
-                ? 'nothing to grade'
+                ? 'no backend to grade'
                 : 'variant'}
           </Typography>
         </Box>
@@ -508,20 +527,25 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           {(['harden', 'revert'] as Direction[]).map((dir) => {
             const dest = DIRECTION_TARGET[dir];
             const here = app.variant === dest;
+            // The variants differ in backend/run.sh, so there is nothing to convert without one.
+            // Offering the button anyway invited a click whose whole plan would be empty.
+            const nothingToConvert = !app.has_backend;
             return (
               <Tooltip
                 key={dir}
                 title={
-                  here
-                    ? `Already on ${VARIANT_LABEL[dest]}`
-                    : `Preview the exact patch that converts this app to ${VARIANT_LABEL[dest]}`
+                  nothingToConvert
+                    ? 'This app has no backend, so there are no variant scripts to convert.'
+                    : here
+                      ? `Already on ${VARIANT_LABEL[dest]}`
+                      : `Preview the exact patch that converts this app to ${VARIANT_LABEL[dest]}`
                 }
               >
                 {/* span so the tooltip still fires while the button is disabled */}
                 <Box component="span">
                   <Button
                     onClick={() => setPreviewing(dir)}
-                    disabled={here}
+                    disabled={here || nothingToConvert}
                     startIcon={<AutoFixHighIcon sx={{ fontSize: 15 }} />}
                     size="small"
                     sx={{
@@ -564,85 +588,106 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
 
       <Collapse in={open} unmountOnExit>
         <Box sx={{ px: 2.5, pb: 2.5, pt: 0.5, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-          {app.checks.map((chk) => (
-            <Box
-              key={chk.id}
-              sx={{
-                display: 'flex',
-                gap: 1.25,
-                p: 1.5,
-                borderRadius: `${c.radius.md}px`,
-                bgcolor:
-                  chk.state === 'pass'
-                    ? c.status.successBg
-                    : chk.state === 'fail'
+          {app.checks.map((chk) => {
+            const row = SIDE_ROW[chk.side];
+            const tint =
+              row.tone === 'bad'
+                ? c.status.error
+                : row.tone === 'good'
+                  ? c.status.success
+                  : c.text.ghost;
+            return (
+              <Box
+                key={chk.id}
+                sx={{
+                  display: 'flex',
+                  gap: 1.25,
+                  p: 1.5,
+                  borderRadius: `${c.radius.md}px`,
+                  bgcolor:
+                    row.tone === 'bad'
                       ? c.status.errorBg
-                      : `${c.text.primary}08`,
-              }}
-            >
-              {chk.state === 'pass' ? (
-                <CheckCircleIcon sx={{ fontSize: 17, color: c.status.success, mt: '2px' }} />
-              ) : chk.state === 'fail' ? (
-                <CancelIcon sx={{ fontSize: 17, color: c.status.error, mt: '2px' }} />
-              ) : (
-                <RemoveCircleOutlineIcon sx={{ fontSize: 17, color: c.text.ghost, mt: '2px' }} />
-              )}
-              <Box sx={{ flex: 1 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                  <Typography sx={{ fontSize: '0.85rem', fontWeight: 550, color: c.text.primary }}>
-                    {chk.label}
+                      : row.tone === 'good'
+                        ? c.status.successBg
+                        : `${c.text.primary}08`,
+                }}
+              >
+                {row.tone === 'good' ? (
+                  <CheckCircleIcon sx={{ fontSize: 17, color: tint, mt: '2px' }} />
+                ) : row.tone === 'bad' ? (
+                  <CancelIcon sx={{ fontSize: 17, color: tint, mt: '2px' }} />
+                ) : (
+                  <RemoveCircleOutlineIcon sx={{ fontSize: 17, color: tint, mt: '2px' }} />
+                )}
+                <Box sx={{ flex: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                    <Typography sx={{ fontSize: '0.85rem', fontWeight: 550, color: c.text.primary }}>
+                      {chk.label}
+                    </Typography>
+                    {/* Names the variant this file is written in. Without it the icon alone is the
+                        ambiguity the page had before: green meant "template" but read as "correct". */}
+                    <Tooltip
+                      title={
+                        chk.side === 'neither'
+                          ? 'This file matches neither variant, so no conversion will settle it.'
+                          : chk.side === 'na'
+                            ? 'This check does not apply to this app.'
+                            : `This file is written the ${row.label} way.`
+                      }
+                    >
+                      <Chip
+                        label={row.label}
+                        size="small"
+                        sx={{
+                          height: 17,
+                          fontSize: '0.6rem',
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          bgcolor: `${tint}1F`,
+                          color: tint,
+                        }}
+                      />
+                    </Tooltip>
+                    {chk.side === 'neither' && (
+                      <Chip
+                        label={chk.severity}
+                        size="small"
+                        sx={{
+                          height: 17,
+                          fontSize: '0.6rem',
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          bgcolor:
+                            chk.severity === 'high' ? `${c.status.error}25` : `${c.text.primary}12`,
+                          color: chk.severity === 'high' ? c.status.error : c.text.muted,
+                        }}
+                      />
+                    )}
+                  </Box>
+                  <Typography
+                    sx={{ fontSize: '0.8rem', color: c.text.secondary, mt: 0.4, lineHeight: 1.5 }}
+                  >
+                    {chk.detail}
                   </Typography>
-                  {chk.state === 'na' && (
-                    <Chip
-                      label="n/a"
-                      size="small"
+                  {/* Only shown for `neither`. A Terminal-side row is not waiting to be fixed; it is
+                      already somewhere, and telling the user how to leave it is not a repair. */}
+                  {chk.side === 'neither' && (
+                    <Typography
                       sx={{
-                        height: 17,
-                        fontSize: '0.6rem',
-                        fontWeight: 700,
-                        textTransform: 'uppercase',
-                        bgcolor: `${c.text.primary}0D`,
-                        color: c.text.muted,
+                        fontSize: '0.76rem',
+                        color: c.text.tertiary,
+                        mt: 0.75,
+                        fontFamily: c.font.mono,
+                        lineHeight: 1.5,
                       }}
-                    />
-                  )}
-                  {chk.state === 'fail' && (
-                    <Chip
-                      label={chk.severity}
-                      size="small"
-                      sx={{
-                        height: 17,
-                        fontSize: '0.6rem',
-                        fontWeight: 700,
-                        textTransform: 'uppercase',
-                        bgcolor:
-                          chk.severity === 'high' ? `${c.status.error}25` : `${c.text.primary}12`,
-                        color: chk.severity === 'high' ? c.status.error : c.text.muted,
-                      }}
-                    />
+                    >
+                      Fix: {chk.fix}
+                    </Typography>
                   )}
                 </Box>
-                <Typography
-                  sx={{ fontSize: '0.8rem', color: c.text.secondary, mt: 0.4, lineHeight: 1.5 }}
-                >
-                  {chk.detail}
-                </Typography>
-                {chk.state === 'fail' && (
-                  <Typography
-                    sx={{
-                      fontSize: '0.76rem',
-                      color: c.text.tertiary,
-                      mt: 0.75,
-                      fontFamily: c.font.mono,
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    Fix: {chk.fix}
-                  </Typography>
-                )}
               </Box>
-            </Box>
-          ))}
+            );
+          })}
         </Box>
       </Collapse>
     </Box>
@@ -687,9 +732,11 @@ const Drift: React.FC = () => {
     const lines = data.apps.map((a) => {
       const head = `${a.name} (${a.id}) — ${VARIANT_LABEL[a.variant]}`;
       if (a.variant !== 'mixed') return head;
+      // Every graded check, each labelled with the variant it matches. Listing only the failures
+      // described a mixed app as a pile of bugs instead of a split, which is what it actually is.
       return `${head}\n${a.checks
-        .filter((k) => k.state === 'fail')
-        .map((k) => `    [${k.severity}] ${k.label}: ${k.detail}`)
+        .filter((k) => k.side !== 'na')
+        .map((k) => `    [${SIDE_ROW[k.side].label}] ${k.label}: ${k.detail}`)
         .join('\n')}`;
     });
     const v = data.variants;
@@ -807,6 +854,13 @@ const Drift: React.FC = () => {
               value={data.variants.mixed}
               label="mixed — neither variant"
               color={data.variants.mixed > 0 ? c.status.error : c.text.secondary}
+            />
+            {/* Backendless apps land here and are a normal fifth of this install, so omitting the
+                tile left the four counts failing to add up to the total. */}
+            <Stat
+              value={data.variants.unknown}
+              label="no backend to grade"
+              color={c.text.secondary}
             />
           </Box>
 
