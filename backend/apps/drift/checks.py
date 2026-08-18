@@ -21,6 +21,13 @@ from typeguard import typechecked
 # silently counted as either.
 P_NA = "na"
 
+# Sentinel for "both variants pass this identically, so it names no variant". A passing check used
+# to be hardcoded to side="patched", which meant the two shared checks reported a variant they
+# cannot distinguish: Launch Film Agent Atlas showed cache_populated_gate as PATCHED while its
+# backend_init.sh carried Default's inline `.populated` spelling, and the to-Default button could
+# never clear it because there is no reverter to run.
+P_SHARED = "shared"
+
 CheckState = Union[bool, str]
 
 # A dist can only ever be considered fresh if it is newer than every source file. Parking the
@@ -38,6 +45,23 @@ P_UNSET_PP_RE = re.compile(r"^\s*unset\s+[^\n#]*\bPYTHONPATH\b", re.M)
 # or is written inline as `"$VENV_PY" -m pip --version`.
 P_PIP_PROBE_RE = re.compile(r"-m\s+pip\s+(--version|-V)\b")
 
+
+@typechecked
+def p_code_only(text: str) -> str:
+    """`text` with whole-line comments removed, for questions about what a script DOES.
+
+    Grading has to ignore prose. check_venv_health_gate accepted any file containing the substring
+    "venv_healthy", and after a to-Default conversion the definition and every call are gone while
+    a neighbouring comment still explains why the helper mattered — so the check read a sentence,
+    reported "sentinel is corroborated by a pip probe", and graded a stock file as Patched. That is
+    the same trap p_no_callers already dodges on the fixer side and the same one that produced two
+    earlier bugs here: a comment asserting something the code does not do.
+
+    Only whole-line comments are dropped. A trailing `#` inside a quoted string is not a comment,
+    and stripping from the first `#` on a line would corrupt exactly the shell this is grading.
+    """
+    return "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
+
 # The line that actually launches the server. It is the strictest signal for PYTHONPATH: a script
 # can strip the variable for pip and still hand a poisoned environment to uvicorn, which is the
 # invocation that decides which fastapi/typeguard the app imports for the rest of its life.
@@ -52,6 +76,38 @@ def p_read(path: str) -> Optional[str]:
             return f.read()
     except OSError:
         return None
+
+
+@typechecked
+def p_declares_backend(ws: str) -> bool:
+    """Whether this workspace runs a backend, asked the way the RUNTIME asks it.
+
+    Serve-mode is gated on `BACKEND_PORT` in .env, not on a backend/ directory: runtime.py's
+    p_start_new_mode reads `BACKEND_PORT` and refuses serve-mode outright when it is set to anything
+    but NONE. Grading has to ask that same question, because a directory that exists while the port
+    says NONE is a backend the runtime will never start.
+
+    Falls back to the directory when there is no .env to read, which is the only case where the
+    runtime's own signal is unavailable.
+    """
+    env_path = os.path.join(ws, ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8", errors="ignore") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() != "BACKEND_PORT":
+                    continue
+                # The runtime strips an inline `# comment` before comparing, and the seeded .env
+                # ships one on this very line, so a raw compare reads "NONE # backend port ..." and
+                # never equals NONE.
+                value = value.split("#", 1)[0].strip().strip('"').strip("'")
+                return bool(value) and value != "NONE"
+    except OSError:
+        pass
+    return os.path.isdir(os.path.join(ws, "backend"))
 
 
 # ############################### which variant is this side ###############################
@@ -152,7 +208,12 @@ def check_venv_health_gate(ws: str) -> Tuple[CheckState, str]:
         return P_NA, "no backend/run.sh — backend not enabled for this app"
     # Any real pip probe counts, whether it is wrapped in a helper named venv_healthy or written
     # inline as `"$VENV_PY" -m pip --version`. The behavior is what protects the boot, not the name.
-    if "venv_healthy" in sh or P_PIP_PROBE_RE.search(sh):
+    #
+    # Asked of the code alone. A converted workspace can keep a comment mentioning venv_healthy long
+    # after the helper and its callers are gone, and matching the raw text there graded a stock file
+    # as Patched on the strength of a sentence.
+    code = p_code_only(sh)
+    if "venv_healthy" in code or P_PIP_PROBE_RE.search(code):
         return True, "sentinel is corroborated by a pip probe, and an unusable venv is rebuilt"
     if "uv venv --clear" in sh:
         return True, "venv is rebuilt from scratch with uv --clear rather than trusting a stale sentinel"
@@ -206,10 +267,15 @@ def check_cache_populated_gate(ws: str) -> Tuple[CheckState, str]:
 def check_serve_mode_marker(ws: str) -> Tuple[CheckState, str]:
     """The serve-mode marker must exist AND carry a far-future mtime.
 
-    Serve-mode decides freshness by comparing dist's mtime against the newest file under
-    frontend/. That check is frontend-only, so an app with a backend gets "restarted" into a static
-    bundle with nothing serving /api. It also deadlocks restart.sh: the sentinel watcher skips
-    runtimes that aren't running, and a process-less runtime never is.
+    This is the one axis that is entirely frontend-side: the marker lives under frontend/src, and
+    nothing about it needs a backend/ directory to exist.
+
+    It is also the one axis that only BITES without a backend. runtime.py:255 now refuses serve-mode
+    for any workspace whose .env declares a BACKEND_PORT, so for a backend app this marker is
+    redundant belt-and-braces. For a frontend-only app serve-mode is live, and this marker is the
+    only thing deciding between a real vite process and a statically served bundle. An earlier
+    version of this docstring had that exactly backwards and justified the marker by a
+    backend-gets-parked-with-no-API failure the runtime no longer has.
 
     The mtime half matters as much as the file: git does not preserve mtimes, so a clone lands this
     file with a checkout-time mtime and the workaround silently stops working.
@@ -293,13 +359,24 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
             state, detail = fn(ws)
         except Exception as exc:  # a scan must degrade, not abort
             state, detail = False, f"check raised: {exc}"
-        # Three-way, and the third value is the point. "patched" means this workspace has the
+        # Four-way, and the last two are the point. "patched" means this workspace has the
         # protection; "default" means it positively matches Default's own spelling; "neither"
         # means it has no protection AND does not look like Default either, i.e. it is genuinely
-        # behind rather than deliberately on the other side. Only "neither" is a defect.
+        # behind rather than deliberately on the other side; "shared" means the question does not
+        # name a variant at all. Only "neither" is a defect.
+        #
+        # A check with no `side` detector has no Default spelling to recognise, which is the same
+        # fact P_VARIANT_BLIND encodes and the same one fixers.P_SHARED_CHECKS refuses to revert.
+        # Passing one means "this workspace has the fix", never "this workspace is Patched", so
+        # answering "patched" put a variant name on the one axis that cannot carry one. That is
+        # what made cache_populated_gate read PATCHED on a workspace whose backend_init.sh is
+        # written Default's way, and left the row unmovable: eligible on the to-Default leg by
+        # `side != target`, then dropped by p_plan because no reverter exists.
         side_fn: Optional[Callable[[str], bool]] = spec.get("side")  # type: ignore[assignment]
         if state == P_NA:
             side = P_NA
+        elif state and side_fn is None:
+            side = P_SHARED
         elif state:
             side = "patched"
         elif side_fn is None:
@@ -351,12 +428,15 @@ def p_grade_workspace(ws: str) -> Dict[str, object]:
 # cycle; fixers imports this module.
 P_VARIANT_BLIND = {"httpx_declared", "cache_populated_gate"}
 
-# The deciding checks that read backend/run.sh. All three go N/A without a backend, which leaves
-# serve_mode_marker as the only gradable one — and a variant named off that single bit is wrong
-# twice over. It is one signal, and for a frontend-only app it is not even a signal: the marker
-# exists to stop an app WITH a backend being parked in a static bundle, so its absence there is the
-# correct state rather than Default's spelling. That is how a frontend-only app reported as a
-# settled Default workspace while having no backend to hold either variant's scripts.
+# The deciding checks that read backend/run.sh. All three go N/A without a backend, leaving
+# serve_mode_marker as the only gradable one.
+#
+# That used to force 'unknown', on the theory that the marker says nothing about a frontend-only
+# app. The opposite is true. runtime.py:255 exempts every workspace declaring a BACKEND_PORT from
+# serve-mode, so the marker is inert for backend apps and decisive for frontend-only ones — it is
+# the ONLY variant axis that still does anything there. Refusing to grade on it meant the three
+# frontend-only apps in this install were the only ones whose live difference the tool ignored,
+# and both of the marker-carrying ones really do sit on the opposite side from the third.
 P_BACKEND_DECIDING = {"ensurepip_guard", "venv_health_gate", "pythonpath_stripped"}
 
 
@@ -375,17 +455,17 @@ def p_variant(results: List[Dict[str, object]]) -> str:
     Default to count as Default, and a file matching neither spelling is by definition a file
     neither author wrote, which is the same thing a half-applied swap produces: mixed, not settled.
 
-    'unknown' is reserved for having nothing to go on at all (a frontend-only app), so it stays a
-    shrug rather than doubling as a diagnosis.
+    'unknown' is reserved for having nothing to go on at all — every deciding check N/A — so it
+    stays a shrug rather than doubling as a diagnosis. A frontend-only app is NOT that case: its
+    serve-mode marker is a real, live variant difference, and the sides list below picks it up.
     """
-    # No backend, no variant. The variants differ almost entirely in backend/run.sh, so an app
-    # without one is not in either and never was; saying so beats naming a variant off the single
-    # check that happens to still be gradable.
-    if not any(str(r["id"]) in P_BACKEND_DECIDING and r["side"] != P_NA for r in results):
-        return "unknown"
+    # Excluded two ways on purpose. P_VARIANT_BLIND is a hand-maintained id list; P_SHARED is
+    # computed from the absence of a `side` detector, which is the same fact the check itself
+    # already knows. Dropping either test would make this correct only for as long as the list and
+    # the specs agree, and a check added later without a detector would silently start voting.
     sides = [
         str(r["side"]) for r in results
-        if r["id"] not in P_VARIANT_BLIND and r["side"] != P_NA
+        if r["id"] not in P_VARIANT_BLIND and r["side"] not in (P_NA, P_SHARED)
     ]
     if not sides:
         return "unknown"

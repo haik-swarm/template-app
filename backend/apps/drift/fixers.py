@@ -45,7 +45,7 @@ class Edit(NamedTuple):
     language: str
     note: str
     set_mtime: Optional[float] = None  # touch the file to this mtime after writing
-    delete: bool = False   # unlink instead of writing new_text (see revert_serve_mode_marker)
+    delete: bool = False   # unlink instead of writing new_text (see to_default_serve_mode_marker)
 
 
 P_SH = "bash"
@@ -96,7 +96,7 @@ def p_deps_span(toml: str) -> Optional[Tuple[int, int]]:
 
 
 @typechecked
-def fix_httpx_declared(ws: str) -> Optional[Edit]:
+def to_patched_httpx_declared(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "pyproject.toml")
     toml = p_read(os.path.join(ws, rel))
     if toml is None:
@@ -164,7 +164,7 @@ P_OSPY_ELSE_RE = re.compile(r'^(\s*)PYTHON="\$\{OPENSWARM_PYTHON\}"\n(\s*)else\n
 
 
 @typechecked
-def fix_ensurepip_guard(ws: str) -> Optional[Edit]:
+def to_patched_ensurepip_guard(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_ensurepip_guard(ws)[0] is True:
@@ -200,7 +200,7 @@ def fix_ensurepip_guard(ws: str) -> Optional[Edit]:
 # These two helpers are inserted together by the health-gate fixer but removed independently by
 # two different reverters, so each is defined once, here, and the combined block is composed from
 # them. Keeping a separate hand-written copy of the pair is what broke the round trip before: the
-# fixer wrote one wording, revert_pythonpath_stripped's guard searched for another, the guard's
+# fixer wrote one wording, to_default_pythonpath_stripped's guard searched for another, the guard's
 # .replace() no-opped, and venv_py() was stranded in the reverted file while the reverter reported
 # success. Concatenation makes "what we write" and "what we look for" the same bytes by
 # construction, which no amount of keeping two literals in sync can guarantee.
@@ -228,7 +228,11 @@ venv_healthy() {
 # a stray blank line — cosmetic, but enough to fail a byte-for-byte round trip.
 P_VENV_HELPERS = P_VENV_PY_HELPER + P_VENV_HEALTHY_HELPER
 
-P_FAST_PATH_RE = re.compile(r'^if \[\[ -d "\$VENV_DIR" && -f "\$SENTINEL" \]\]; then\s*$', re.M)
+# Group 1 holds any conjuncts the workspace appended to the stock test itself, so the swap to the
+# Patched spelling carries them across instead of dropping them. Mirror of P_HARDENED_FAST_PATH_RE.
+P_FAST_PATH_RE = re.compile(
+    r'^if \[\[ -d "\$VENV_DIR" && -f "\$SENTINEL" \]\]((?: && [a-z_][a-z0-9_]*)*); then$', re.M
+)
 
 P_SELF_HEAL = '''    # Drop a venv that exists but is unusable (e.g. copied in from a warm
     # cache that was built without pip); otherwise the install below fails
@@ -250,7 +254,7 @@ P_CREATE_CLOSE_RE = re.compile(
 
 
 @typechecked
-def fix_venv_health_gate(ws: str) -> Optional[Edit]:
+def to_patched_venv_health_gate(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_venv_health_gate(ws)[0] is True:
@@ -269,7 +273,9 @@ def fix_venv_health_gate(ws: str) -> Optional[Edit]:
         needed += P_VENV_HEALTHY_HELPER
     if needed:
         new = P_FAST_PATH_RE.sub(lambda m: needed + m.group(0), new, count=1)
-    new = P_FAST_PATH_RE.sub('if [[ -f "$SENTINEL" ]] && venv_healthy; then', new, count=1)
+    new = P_FAST_PATH_RE.sub(
+        lambda m: f'if [[ -f "$SENTINEL" ]] && venv_healthy{m.group(1)}; then', new, count=1
+    )
     new = P_CREATE_BLOCK_RE.sub(lambda m: P_SELF_HEAL + m.group(0), new, count=1)
     # The reverter undoes both of these, but nothing here ever applied them, so a hardened file
     # never matched the real variant and the harden->revert->harden cycle could not close. A venv
@@ -305,11 +311,28 @@ P_SWARM_DEBUG_RE = re.compile(r'&& ("\$SWARM_DEBUG_BIN" toggle on --all)')
 
 
 @typechecked
-def fix_pythonpath_stripped(ws: str) -> Optional[Edit]:
+def to_patched_pythonpath_stripped(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_pythonpath_stripped(ws)[0] is True:
         return None
+    # A workspace that protected itself with the whole-script `unset` form gets that form back, and
+    # nothing else. Restoring it AND adding per-invocation `env -u` would hand back more than was
+    # taken: these scripts leave their pip and uvicorn lines bare precisely because the unset above
+    # already covers them, so layering both on would never reproduce the tree we started from.
+    #
+    # This is also why the two spellings cannot share a code path. `unset` covers every command in
+    # the script including ones added later; `env -u` covers exactly the call sites this file knows
+    # about. Converting one into the other is a behaviour change, not a reformat.
+    anchor = p_unset_pp_anchor(sh)
+    if anchor is not None:
+        return Edit(
+            rel_path=rel,
+            old_text=sh,
+            new_text=sh[:anchor] + P_UNSET_PP_STMTS + sh[anchor:],
+            language=P_SH,
+            note="Restore the whole-script PYTHONPATH unset this workspace protects itself with.",
+        )
     if not P_UVICORN_RE.search(sh):
         return None
     new = sh
@@ -368,7 +391,7 @@ fi
 
 
 @typechecked
-def fix_cache_populated_gate(ws: str) -> Optional[Edit]:
+def to_patched_cache_populated_gate(ws: str) -> Optional[Edit]:
     rel = "backend_init.sh"
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_cache_populated_gate(ws)[0] is True:
@@ -388,28 +411,28 @@ def fix_cache_populated_gate(ws: str) -> Optional[Edit]:
 
 # ############################### serve-mode marker ###############################
 
-# Byte-for-byte the marker this repo already ships, because the fixer's output IS that file and a
+# Byte-for-byte the marker this install already ships, because the fixer's output IS that file and a
 # second hand-written wording is just drift waiting to happen: it round-trips to a body the app's
 # author never wrote, and the diff the user approves stops matching the file on disk.
-P_MARKER_BODY = """Keeps this app on a real dev-server runtime instead of OpenSwarm's static
-serve-mode. Not imported by anything; only its mtime matters.
+#
+# It said that before and was not true. All 12 markers on disk share one md5, and this constant
+# matched none of them (796 bytes here against 724 there), so hardening a workspace that had been
+# reverted wrote a DIFFERENT body than the one removed and roundtrip_check failed on every app
+# carrying a real marker. Verified equal to the shipped file; if you reword it, reword the file too.
+P_MARKER_BODY = """Serve mode decides freshness by comparing dist's mtime against the newest file under
+frontend/. That check is frontend-only, so an app WITH a backend gets "restarted" into a static
+bundle with nothing serving /api — and it deadlocks restart.sh, because the sentinel watcher skips
+runtimes that aren't running and a process-less runtime never is.
 
-Serve-mode (runtime.py:250) skips spawning any process when static_fresh()
-says frontend/dist is newer than every file under frontend/. That check is
-frontend-only, so an app with a FastAPI backend gets "restarted" into a
-bundle with no backend behind it. It also breaks restart.sh: the sentinel
-watcher ignores runtimes where `running` is False (runtime.py:653), and a
-process-less runtime is never running, so restart requests are never
-consumed and the script times out after 30s.
-
-This file is dated far in the future, so dist can never be newer than it
-and static_fresh() is always False. Deleting it re-enables serve-mode and
-brings both problems back.
+This file's mtime is parked in 2038, so it is permanently newer than any dist build and the
+freshness comparison can never come out true. The mtime is the mechanism, not the filename: git
+does not preserve mtimes, so a fresh clone lands this file with a checkout-time mtime and the
+workaround silently stops working. frontend/run.sh re-stamps it on every boot for that reason.
 """
 
 
 @typechecked
-def fix_serve_mode_marker(ws: str) -> Optional[Edit]:
+def to_patched_serve_mode_marker(ws: str) -> Optional[Edit]:
     if check_serve_mode_marker(ws)[0] is True:
         return None
     if not os.path.isdir(os.path.join(ws, "frontend", "src")):
@@ -425,13 +448,13 @@ def fix_serve_mode_marker(ws: str) -> Optional[Edit]:
     )
 
 
-P_FIXERS: Dict[str, Callable[[str], Optional[Edit]]] = {
-    "httpx_declared": fix_httpx_declared,
-    "ensurepip_guard": fix_ensurepip_guard,
-    "venv_health_gate": fix_venv_health_gate,
-    "pythonpath_stripped": fix_pythonpath_stripped,
-    "cache_populated_gate": fix_cache_populated_gate,
-    "serve_mode_marker": fix_serve_mode_marker,
+P_TO_PATCHED: Dict[str, Callable[[str], Optional[Edit]]] = {
+    "httpx_declared": to_patched_httpx_declared,
+    "ensurepip_guard": to_patched_ensurepip_guard,
+    "venv_health_gate": to_patched_venv_health_gate,
+    "pythonpath_stripped": to_patched_pythonpath_stripped,
+    "cache_populated_gate": to_patched_cache_populated_gate,
+    "serve_mode_marker": to_patched_serve_mode_marker,
 }
 
 
@@ -449,13 +472,34 @@ P_FIXERS: Dict[str, Callable[[str], Optional[Edit]]] = {
 #
 # These are deliberately NOT "restore the .drift-backup snapshot". A snapshot only exists for apps
 # this tool already fixed, which would make revert unavailable on exactly the workspace that
-# motivated it. Computing the inverse means direction is a property of the patch, not of history.
+# motivated it. Computing the inverse means target is a property of the patch, not of history.
 
 
 @typechecked
 def p_words(text: str) -> set:
     """The distinct words of some comment prose, lowercased and stripped of punctuation."""
     return {w for w in re.findall(r"[A-Za-z_]{3,}", text.lower())}
+
+
+@typechecked
+def p_no_callers(text: str, fn: str) -> bool:
+    """True if `fn` is defined but never invoked in `text`.
+
+    A shell helper can only be deleted once nothing calls it, and "nothing" has to include callers
+    this tool never wrote. Apps add their own guards — deps_present(), deps_installed() — that call
+    our helpers, so the old assumption that removing our own call sites removed the last one
+    deleted a definition out from under a live caller and produced a run.sh that dies on boot.
+
+    Invocations are counted by stripping the definition first, then looking for the bare word.
+    Comments are excluded: prose naming the helper is not a caller, and treating it as one pins
+    the definition in place forever.
+    """
+    body = re.sub(
+        rf'^{re.escape(fn)}\(\)\s*\{{.*?^\}}\n?', "", text, count=1, flags=re.M | re.S
+    )
+    body = re.sub(rf'^{re.escape(fn)}\(\)\s*\{{[^}}]*\}}\n?', "", body, count=1, flags=re.M)
+    live = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
+    return re.search(rf'\b{re.escape(fn)}\b', live) is None
 
 
 @typechecked
@@ -558,7 +602,7 @@ P_ENSUREPIP_ERROR = (
 
 
 @typechecked
-def revert_ensurepip_guard(ws: str) -> Optional[Edit]:
+def to_default_ensurepip_guard(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_ensurepip_guard(ws)[0] is not True:
@@ -592,6 +636,16 @@ def revert_ensurepip_guard(ws: str) -> Optional[Edit]:
 
 P_STOCK_FAST_PATH = 'if [[ -d "$VENV_DIR" && -f "$SENTINEL" ]]; then'
 
+# The Patched fast path, with any FURTHER conjuncts the workspace added itself captured in group 1.
+# Two apps guard the skip with their own `&& deps_present` / `&& deps_installed` probe, which this
+# tool did not write and has no business deleting. An exact-string anchor matched neither, so the
+# reverter returned None while the check still read as Patched: both buttons dead, workspace stuck
+# in a variant it could not leave. Capturing the tail restores `-d "$VENV_DIR"` and carries the
+# app's own guard across untouched.
+P_HARDENED_FAST_PATH_RE = re.compile(
+    r'^if \[\[ -f "\$SENTINEL" \]\] && venv_healthy((?: && [a-z_][a-z0-9_]*)*); then$', re.M
+)
+
 P_HARDENED_CREATE = '''        if ! "$PYTHON" -m venv "$VENV_DIR"; then
             echo "Error: Failed to create virtual environment."
             rm -rf "$VENV_DIR"
@@ -619,14 +673,20 @@ P_NO_PIP_GUARD = '''    if ! venv_healthy; then
 
 
 @typechecked
-def revert_venv_health_gate(ws: str) -> Optional[Edit]:
+def to_default_venv_health_gate(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_venv_health_gate(ws)[0] is not True:
         return None
-    if 'if [[ -f "$SENTINEL" ]] && venv_healthy; then' not in sh:
+    m = P_HARDENED_FAST_PATH_RE.search(sh)
+    if m is None:
         return None
-    new = sh.replace('if [[ -f "$SENTINEL" ]] && venv_healthy; then', P_STOCK_FAST_PATH, 1)
+    # Keep the workspace's own extra conjuncts; only `venv_healthy` is ours to take back.
+    stock_line = (
+        P_STOCK_FAST_PATH[:-len("; then")] + m.group(1) + "; then"
+        if m.group(1) else P_STOCK_FAST_PATH
+    )
+    new = sh[:m.start()] + stock_line + sh[m.end():]
     dropped = p_drop(new, P_SELF_HEAL)
     if dropped is None:
         return None
@@ -635,12 +695,17 @@ def revert_venv_health_gate(ws: str) -> Optional[Edit]:
     if dropped is not None:
         new = dropped
     new = new.replace(P_HARDENED_CREATE, P_STOCK_CREATE, 1)
-    # Drop venv_healthy() itself, now that its last caller is gone. venv_py() is NOT dropped here:
-    # it belongs to the PYTHONPATH fix and may still have callers. When both checks are reverted
-    # together p_plan threads this text into the next reverter, which removes it then.
-    dropped = p_drop(new, P_VENV_HEALTHY_HELPER)
-    if dropped is not None:
-        new = dropped
+    # Drop venv_healthy() only once nothing calls it any more, asked of the text rather than
+    # assumed. Two workspaces guard the fast path with their own deps_present()/deps_installed()
+    # helper that calls venv_py, and one of them also calls venv_healthy; deleting the definition
+    # on the theory that "our callers are the only callers" left a live call to a function that no
+    # longer existed, i.e. a run.sh that dies on boot. venv_py() is likewise left alone here: it
+    # belongs to the PYTHONPATH fix, and when both checks convert together p_plan threads this text
+    # into the next reverter, which drops it then — if by that point it too has no callers.
+    if p_no_callers(new, "venv_healthy"):
+        dropped = p_drop(new, P_VENV_HEALTHY_HELPER)
+        if dropped is not None:
+            new = dropped
     if new == sh:
         return None
     return Edit(
@@ -679,14 +744,58 @@ P_HARDENED_DEBUG_RE = re.compile(r'&& env -u PYTHONPATH ("\$SWARM_DEBUG_BIN" tog
 # of any kind, so this block is not "already Default", it is Patched's protection under a
 # different name. The comment lines immediately above are swept with it because they exist only to
 # explain it; a blank line terminates the sweep, which is what protects an unrelated comment.
+# Both spellings, because they are the same protection: two `unset` lines, or one line naming
+# several variables. An earlier version matched only the two-line form, so 81654cd2's
+# `unset PYTHONPATH PYTHONHOME` was invisible to it — the check passed, the harden button was
+# therefore disabled, and revert found no anchor and produced an empty plan. Permanently `mixed`
+# with no button able to move it, which is the same dead-end P_HARDENED_FAST_PATH_RE fixed.
 P_UNSET_PP_BLOCK_RE = re.compile(
-    r'(?:^#[^\n]*\n)*^unset PYTHONPATH\n(?:^unset PYTHONHOME\n)?\n?',
+    r'(?:^#[^\n]*\n)*^unset PYTHONPATH(?: PYTHONHOME)?\n(?:^unset PYTHONHOME\n)?\n?',
     re.M,
 )
 
+# Only the STATEMENTS, leaving the workspace's own comment above them in place.
+#
+# The comment is load-bearing on the way back. Each of the three workspaces writing this dialect
+# words its comment differently and puts the block in a different place, so once the prose is gone
+# nothing in the file records that this workspace ever used the whole-script form, and a to-Patched
+# leg has no way to tell it apart from a stock tree. Restoring unconditionally instead would inject
+# the block into the fourteen workspaces that never had it. Keeping the prose keeps the breadcrumb.
+P_UNSET_PP_STMT_RE = re.compile(
+    r'^unset PYTHONPATH(?: PYTHONHOME)?\n(?:^unset PYTHONHOME\n)?', re.M
+)
+
+# The canonical statements the restorer re-emits. `unset PYTHONPATH PYTHONHOME` on one line means
+# exactly the same thing to bash, but which spelling a workspace used is not recoverable once the
+# lines are gone, so the round trip normalises the one-line form onto the two-line one. That is a
+# spelling change with no behavioural difference, and it is the same normalise-over-preserve call
+# that governs the venv-create and pip dialects.
+P_UNSET_PP_STMTS = "unset PYTHONPATH\nunset PYTHONHOME\n"
+
 
 @typechecked
-def revert_pythonpath_stripped(ws: str) -> Optional[Edit]:
+def p_unset_pp_anchor(text: str) -> Optional[int]:
+    """Offset to re-insert the unset statements at, or None if this file never carried them.
+
+    Looks for the orphaned comment the strip leg left behind: a run of `#` lines that talks about
+    PYTHONPATH and is followed by a blank line, with no `unset PYTHONPATH` still present. Requiring
+    the prose to actually name the variable is what keeps this from firing on the Windows-layout
+    comment that follows it in every one of these scripts.
+    """
+    if P_UNSET_PP_STMT_RE.search(text):
+        return None
+    for m in re.finditer(r'(?:^#[^\n]*\n)+', text, re.M):
+        block = m.group(0)
+        if "pythonpath" not in block.lower():
+            continue
+        if not re.match(r'\n', text[m.end():] or "\n"):
+            continue
+        return m.end()
+    return None
+
+
+@typechecked
+def to_default_pythonpath_stripped(ws: str) -> Optional[Edit]:
     rel = os.path.join("backend", "run.sh")
     sh = p_read(os.path.join(ws, rel))
     if sh is None or check_pythonpath_stripped(ws)[0] is not True:
@@ -695,7 +804,11 @@ def revert_pythonpath_stripped(ws: str) -> Optional[Edit]:
     # made the whole-script form unreachable.
     if not P_HARDENED_UVICORN_RE.search(sh) and not P_UNSET_PP_BLOCK_RE.search(sh):
         return None
-    new = P_UNSET_PP_BLOCK_RE.sub('', sh, count=1)
+    # Take the statements, leave the prose. The comment is the only surviving evidence that this
+    # workspace used the whole-script form, and to_patched_pythonpath_stripped reads it to decide
+    # whether to put the block back — without it the swap is one-way and silently narrows this
+    # workspace's protection from "every command in the script" to "the three call sites we know".
+    new = P_UNSET_PP_STMT_RE.sub('', sh, count=1)
     new = P_HARDENED_UVICORN_RE.sub(lambda m: f'{m.group(1)}{m.group(2)}', new, count=1)
     new = P_HARDENED_PIP_RE.sub(lambda m: f'{m.group(1)}"$VENV_PY" -m pip install -e .', new, count=1)
     new = P_HARDENED_PIP_HELPER_RE.sub(
@@ -728,7 +841,7 @@ def revert_pythonpath_stripped(ws: str) -> Optional[Edit]:
 
 
 @typechecked
-def revert_serve_mode_marker(ws: str) -> Optional[Edit]:
+def to_default_serve_mode_marker(ws: str) -> Optional[Edit]:
     """Re-enable serve-mode by deleting the marker.
 
     The only reverter whose edit is a deletion, which is why Edit carries `delete`: writing the
@@ -752,31 +865,31 @@ def revert_serve_mode_marker(ws: str) -> Optional[Edit]:
 
 # No entry for the ids in P_SHARED_CHECKS: see the comment there. A check with a fixer but no
 # reverter is one-way by design, and p_plan reports it as shared rather than silently doing nothing.
-P_REVERTERS: Dict[str, Callable[[str], Optional[Edit]]] = {
-    "ensurepip_guard": revert_ensurepip_guard,
-    "venv_health_gate": revert_venv_health_gate,
-    "pythonpath_stripped": revert_pythonpath_stripped,
-    "serve_mode_marker": revert_serve_mode_marker,
+P_TO_DEFAULT: Dict[str, Callable[[str], Optional[Edit]]] = {
+    "ensurepip_guard": to_default_ensurepip_guard,
+    "venv_health_gate": to_default_venv_health_gate,
+    "pythonpath_stripped": to_default_pythonpath_stripped,
+    "serve_mode_marker": to_default_serve_mode_marker,
 }
 
 
 @typechecked
-def p_plan(ws: str, check_ids: List[str], direction: str = "harden") -> Dict[str, object]:
+def p_plan(ws: str, check_ids: List[str], target: str = "patched") -> Dict[str, object]:
     """Compute every edit for the requested checks without touching disk.
 
     Three fixers rewrite run.sh, so their edits are folded in sequence: each one re-reads from the
     running text rather than from the file, and the diff the user sees is the combined result.
 
-    `direction` selects the table. Both directions share this function deliberately: the fold, the
+    `target` selects the table. Both directions share this function deliberately: the fold, the
     determinism and the one-diff-per-file collapse are properties of planning, not of which way you
     are going, and duplicating them is how the two paths would drift apart.
     """
-    table = P_FIXERS if direction == "harden" else P_REVERTERS
+    table = P_TO_PATCHED if target == "patched" else P_TO_DEFAULT
     edits: List[Edit] = []
     skipped: List[Dict[str, str]] = []
     # A check both variants implement identically has a fixer but no reverter. Saying so beats
     # dropping it from `pending` silently, which reads as "the tool forgot about this one".
-    shared = {cid for cid in check_ids if cid in P_SHARED_CHECKS} if direction == "revert" else set()
+    shared = {cid for cid in check_ids if cid in P_SHARED_CHECKS} if target == "default" else set()
     for cid in check_ids:
         if cid in shared:
             skipped.append({
@@ -792,7 +905,7 @@ def p_plan(ws: str, check_ids: List[str], direction: str = "harden") -> Dict[str
     overlay: Dict[str, str] = {}
     real_read = p_read
 
-    verb = "satisfied" if direction == "harden" else "already stock"
+    verb = "satisfied" if target == "patched" else "already stock"
     for cid in pending:
         edit = _with_overlay(overlay, ws, table[cid])
         if edit is None:

@@ -25,8 +25,12 @@ import { useClaudeTokens } from '@/shared/styles/ThemeContext';
 import { DRIFT_SCAN_URL, DRIFT_FIX_URL } from '@/shared/state/API_ENDPOINTS';
 
 /** Which variant this one check's file matches. `neither` is the only value that is a defect: it
- *  means the file matches no variant's spelling, not that it is on the other side. */
-type Side = 'patched' | 'default' | 'neither' | 'na';
+ *  means the file matches no variant's spelling, not that it is on the other side.
+ *
+ *  `shared` is not a variant. Both variants satisfy those checks identically, so the axis has no
+ *  Patched side and no Default side to report. Calling a passing one `patched` put a variant name
+ *  on a file that carries none, and no conversion could ever move it off that name. */
+type Side = 'patched' | 'default' | 'neither' | 'shared' | 'na';
 
 interface Check {
   id: string;
@@ -41,8 +45,8 @@ interface Check {
 /** Neither Patched nor Default is the correct one. `mixed` is the only state that is wrong. */
 type Variant = 'patched' | 'default' | 'mixed' | 'unknown';
 
-/** "harden" converts a workspace to the Patched variant; "revert" converts it to Default. */
-type Direction = 'harden' | 'revert';
+/** The two variants a workspace can be converted INTO. `mixed`/`unknown` are states, not targets. */
+type Target = 'patched' | 'default';
 
 interface AppRow {
   id: string;
@@ -81,7 +85,7 @@ interface FixResult {
   applied: boolean;
   dry_run?: boolean;
   app_id: string;
-  direction: Direction;
+  target: Target;
   files: FixFile[];
   targets: string[];
   skipped: { id: string; reason: string }[];
@@ -100,11 +104,6 @@ const VARIANT_LABEL: Record<Variant, string> = {
   unknown: 'Unknown',
 };
 
-const DIRECTION_TARGET: Record<Direction, Variant> = {
-  harden: 'patched',
-  revert: 'default',
-};
-
 /** How one check row reads. Keyed on `side`, never on pass/fail: a row that matches Default is
  *  reporting which variant this file is written in, and colouring that red said the user's own
  *  deliberate conversion was damage. Only `neither` — matching no variant at all — is a defect. */
@@ -112,29 +111,36 @@ const SIDE_ROW: Record<Side, { label: string; tone: 'good' | 'bad' | 'quiet' }> 
   patched: { label: 'Patched V1.7.6', tone: 'good' },
   default: { label: 'Default V1.7.8-exp.8+', tone: 'good' },
   neither: { label: 'Neither', tone: 'bad' },
+  // Green, because the workspace does have the fix — it is passing. But it names no variant, so
+  // it reads "Both variants" rather than borrowing one side's version number.
+  shared: { label: 'Both variants', tone: 'good' },
   na: { label: 'n/a', tone: 'quiet' },
 };
+
+/** Sides that name a variant. The two conversion buttons can only ever move these, so counts and
+ *  eligibility are computed over them rather than over "everything that isn't n/a". */
+const NAMES_A_VARIANT = (s: Side): boolean => s === 'patched' || s === 'default' || s === 'neither';
 
 /** Preview + confirm. The dialog only ever shows a server-computed plan, never a guess made here. */
 const FixPreview: React.FC<{
   app: AppRow;
-  direction: Direction;
+  target: Target;
   onClose: () => void;
   onApplied: () => void;
-}> = ({ app, direction, onClose, onApplied }) => {
+}> = ({ app, target, onClose, onApplied }) => {
   const c = useClaudeTokens();
   const [plan, setPlan] = React.useState<FixResult | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [done, setDone] = React.useState<FixResult | null>(null);
-  const target = VARIANT_LABEL[DIRECTION_TARGET[direction]];
+  const targetLabel = VARIANT_LABEL[target];
 
   const post = React.useCallback(async (dryRun: boolean): Promise<FixResult> => {
     const res = await fetch(DRIFT_FIX_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: app.id, dry_run: dryRun, direction }),
+      body: JSON.stringify({ app_id: app.id, dry_run: dryRun, target }),
     });
     const body = await res.json();
     // 422 is the syntax gate refusing to write, which carries a useful payload rather than an
@@ -143,7 +149,7 @@ const FixPreview: React.FC<{
       throw new Error(body?.detail || `request failed (${res.status})`);
     }
     return body as FixResult;
-  }, [app.id, direction]);
+  }, [app.id, target]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -198,7 +204,7 @@ const FixPreview: React.FC<{
       >
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography sx={{ fontSize: '1.1rem', fontWeight: 600, color: c.text.primary }}>
-            {done?.applied ? 'Converted' : 'Convert'} {app.name} to {target}
+            {done?.applied ? 'Converted' : 'Convert'} {app.name} to {targetLabel}
           </Typography>
           <Typography sx={{ fontSize: '0.75rem', color: c.text.ghost, fontFamily: c.font.mono }}>
             {app.path}
@@ -246,7 +252,7 @@ const FixPreview: React.FC<{
         {done?.applied && (
           <Box sx={{ p: 2, borderRadius: `${c.radius.md}px`, bgcolor: c.status.successBg, mb: 2 }}>
             <Typography sx={{ color: c.status.success, fontSize: '0.88rem', fontWeight: 600 }}>
-              Now on the {target} variant.
+              Now on the {targetLabel} variant.
             </Typography>
             <Typography sx={{ color: c.text.secondary, fontSize: '0.78rem', mt: 0.5, lineHeight: 1.55 }}>
               Originals saved to <code>{done.backup}</code> inside the workspace. The backend picks
@@ -276,7 +282,7 @@ const FixPreview: React.FC<{
 
         {!loading && files.length === 0 && !blocked?.length && (
           <Typography sx={{ color: c.text.muted, fontSize: '0.88rem', py: 3 }}>
-            {plan?.reason ?? `Already on the ${target} variant; nothing to change.`}
+            {plan?.reason ?? `Already on the ${targetLabel} variant; nothing to change.`}
           </Typography>
         )}
 
@@ -356,7 +362,7 @@ const FixPreview: React.FC<{
           >
             {applying
               ? 'Converting…'
-              : `Convert to ${target} (${files.length} file${files.length === 1 ? '' : 's'})`}
+              : `Convert to ${targetLabel} (${files.length} file${files.length === 1 ? '' : 's'})`}
           </Button>
         )}
       </DialogActions>
@@ -407,14 +413,17 @@ const Stat: React.FC<{
 const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed }) => {
   const c = useClaudeTokens();
   const [open, setOpen] = React.useState(false);
-  const [previewing, setPreviewing] = React.useState<Direction | null>(null);
+  const [previewing, setPreviewing] = React.useState<Target | null>(null);
   // Only `mixed` is a problem. Both settled variants are fine places for a workspace to be, so the
   // card colours off "is it in one of them" rather than off a passing count that treats
   // Patched as correct and everything else as damage.
   const settled = app.variant === 'patched' || app.variant === 'default';
   // A mixed app is described by how its checks split across the two variants, not by a passing
   // count: "3/6 passing" implies six were meant to pass, which is only true of one of the variants.
-  const graded = app.checks.filter((k) => k.side !== 'na').length;
+  //
+  // Counted over the checks that name a variant. Including the shared ones inflated the
+  // denominator with axes no conversion can move, so a fully-converted app read as 5/6.
+  const graded = app.checks.filter((k) => NAMES_A_VARIANT(k.side)).length;
   const onPatched = app.checks.filter((k) => k.side === 'patched').length;
   const variantColor =
     app.variant === 'mixed'
@@ -534,22 +543,24 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
           </Typography>
         </Box>
 
-        {/* Both directions are always offered, and the one the workspace is already in is disabled
+        {/* Both targets are always offered, and the one the workspace is already in is disabled
             rather than hidden. A Patched app previously showed no button at all, which made the
             Patched look like the only destination when it is just the one it happens to be in. */}
         <Box sx={{ display: 'flex', gap: 0.75, flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-          {(['harden', 'revert'] as Direction[]).map((dir) => {
-            const dest = DIRECTION_TARGET[dir];
+          {(['patched', 'default'] as Target[]).map((dest) => {
             const here = app.variant === dest;
-            // The variants differ in backend/run.sh, so there is nothing to convert without one.
-            // Offering the button anyway invited a click whose whole plan would be empty.
-            const nothingToConvert = !app.has_backend;
+            // Gate on whether any check applies here, not on whether a backend exists. The
+            // serve-mode marker lives under frontend/src and is a real conversion for an app with
+            // no backend at all — in fact it is the ONLY axis that still changes behaviour there,
+            // since the runtime exempts backend apps from serve-mode. Keying off has_backend
+            // disabled both buttons on exactly the apps this axis governs.
+            const nothingToConvert = graded === 0;
             return (
               <Tooltip
-                key={dir}
+                key={dest}
                 title={
                   nothingToConvert
-                    ? 'This app has no backend, so there are no variant scripts to convert.'
+                    ? 'No check applies to this workspace, so there is nothing to convert.'
                     : here
                       ? `Already on ${VARIANT_LABEL[dest]}`
                       : `Preview the exact patch that converts this app to ${VARIANT_LABEL[dest]}`
@@ -558,7 +569,7 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
                 {/* span so the tooltip still fires while the button is disabled */}
                 <Box component="span">
                   <Button
-                    onClick={() => setPreviewing(dir)}
+                    onClick={() => setPreviewing(dest)}
                     disabled={here || nothingToConvert}
                     startIcon={<AutoFixHighIcon sx={{ fontSize: 15 }} />}
                     size="small"
@@ -594,7 +605,7 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
       {previewing && (
         <FixPreview
           app={app}
-          direction={previewing}
+          target={previewing}
           onClose={() => setPreviewing(null)}
           onApplied={onFixed}
         />
@@ -646,7 +657,9 @@ const AppCard: React.FC<{ app: AppRow; onFixed: () => void }> = ({ app, onFixed 
                           ? 'This file matches neither variant, so no conversion will settle it.'
                           : chk.side === 'na'
                             ? 'This check does not apply to this app.'
-                            : `This file is written the ${row.label} way.`
+                            : chk.side === 'shared'
+                              ? 'Both variants satisfy this the same way, so it names no variant and neither button changes it.'
+                              : `This file is written the ${row.label} way.`
                       }
                     >
                       <Chip
@@ -754,10 +767,12 @@ const Drift: React.FC = () => {
     const lines = visible.map((a) => {
       const head = `${a.name} (${a.id}) — ${VARIANT_LABEL[a.variant]}`;
       if (a.variant !== 'mixed') return head;
-      // Every graded check, each labelled with the variant it matches. Listing only the failures
-      // described a mixed app as a pile of bugs instead of a split, which is what it actually is.
+      // Every check that names a variant, each labelled with the one it matches. Listing only the
+      // failures described a mixed app as a pile of bugs instead of a split, which is what it
+      // actually is. Shared checks are left out: this block exists to show how the app splits
+      // across the two variants, and a row belonging to both says nothing about that split.
       return `${head}\n${a.checks
-        .filter((k) => k.side !== 'na')
+        .filter((k) => NAMES_A_VARIANT(k.side))
         .map((k) => `    [${SIDE_ROW[k.side].label}] ${k.label}: ${k.detail}`)
         .join('\n')}`;
     });

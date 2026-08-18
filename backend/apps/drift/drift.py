@@ -25,7 +25,13 @@ from typeguard import typechecked
 from swarm_debug import debug
 
 from backend.config.Apps import SubApp
-from backend.apps.drift.checks import P_CHECKS, p_grade_workspace
+from backend.apps.drift.checks import (
+    P_CHECKS,
+    P_NA,
+    P_SHARED,
+    p_declares_backend,
+    p_grade_workspace,
+)
 from backend.apps.drift.fixers import p_plan
 
 
@@ -90,7 +96,10 @@ def p_scan() -> List[Dict[str, Any]]:
             "name": p_workspace_name(ws),
             "path": ws,
             "is_self": os.path.realpath(ws) == os.path.realpath(P_THIS_WORKSPACE),
-            "has_backend": os.path.isdir(os.path.join(ws, "backend")),
+            # The runtime's own question (BACKEND_PORT in .env), not "is there a backend/ dir".
+            # A directory whose port says NONE is a backend that never starts, and serve-mode —
+            # the thing the marker check is about — keys off the port alone.
+            "has_backend": p_declares_backend(ws),
             "failed": graded["failed"],
             "applicable": graded["applicable"],
             "passed": graded["passed"],
@@ -137,11 +146,11 @@ async def scan() -> JSONResponse:
 
 class FixRequest(BaseModel):
     app_id: str
-    check_ids: Optional[List[str]] = None  # None means "every check on the wrong side of direction"
+    check_ids: Optional[List[str]] = None  # None means "every check on the wrong side of target"
     dry_run: bool = True
-    # "harden" applies the Patched fixes; "revert" puts the stock scripts back. Defaulting to
-    # harden means a client that never sends the field keeps its exact previous behavior.
-    direction: str = "harden"
+    # The variant to convert INTO. Neither is "correct", so this is a destination, not a repair
+    # direction; "patched" is the default only because it preserves the old client's behaviour.
+    target: str = "patched"
 
 
 @typechecked
@@ -210,19 +219,28 @@ def p_toml_parses(text: str) -> Optional[str]:
 @drift.router.post("/fix")
 @typechecked
 async def fix(req: FixRequest) -> JSONResponse:
-    if req.direction not in ("harden", "revert"):
-        raise HTTPException(status_code=400, detail="direction must be 'harden' or 'revert'")
+    if req.target not in ("patched", "default"):
+        raise HTTPException(status_code=400, detail="target must be 'patched' or 'default'")
     ws = p_resolve_workspace(req.app_id)
 
     graded = p_grade_workspace(ws)
-    # Hardening acts on what fails; reverting acts on what passes. A check that is N/A here has no
-    # file to edit in either direction, so it is eligible for neither.
-    wanted_state = "fail" if req.direction == "harden" else "pass"
-    eligible = [c["id"] for c in graded["checks"] if c["state"] == wanted_state]
+    # Eligible means "not already on the target side", asked of `side` rather than of pass/fail.
+    # Those differ on exactly one value: a check whose side is `neither` matches no variant, and it
+    # reads as state=fail. Keying off state therefore made it eligible when converting to Patched
+    # but invisible when converting to Default — so a workspace behind both could be dragged onto
+    # one variant and never the other. A check that is N/A has no file to edit either way.
+    #
+    # P_SHARED is excluded for the same reason as N/A: there is no other side to convert to. It
+    # used to satisfy `side != target` on the to-Default leg, get requested, and then be dropped
+    # by p_plan for want of a reverter — so the endpoint reported it as a target it never touched.
+    eligible = [
+        c["id"] for c in graded["checks"]
+        if c["side"] not in (P_NA, P_SHARED) and c["side"] != req.target
+    ]
     requested = req.check_ids if req.check_ids is not None else eligible
 
-    # Validate against every known check, not against the direction's table: a shared check like
-    # httpx_declared has no reverter, but asking to revert it is a no-op to report, not a 400.
+    # Validate against every known check, not against the target's table: a shared check like
+    # httpx_declared has no to-Default entry, but asking for it is a no-op to report, not a 400.
     known = {c["id"] for c in P_CHECKS}
     unknown = [cid for cid in requested if cid not in known]
     if unknown:
@@ -231,7 +249,7 @@ async def fix(req: FixRequest) -> JSONResponse:
     # happened, so intersect rather than trusting the caller's list.
     targets = [cid for cid in requested if cid in eligible]
 
-    plan = p_plan(ws, targets, req.direction)
+    plan = p_plan(ws, targets, req.target)
     edits = plan["edits"]
 
     blocked: List[Dict[str, str]] = []
@@ -276,7 +294,7 @@ async def fix(req: FixRequest) -> JSONResponse:
             "applied": False,
             "dry_run": True,
             "app_id": req.app_id,
-            "direction": req.direction,
+            "target": req.target,
             "files": files,
             "targets": targets,
             "skipped": plan["skipped"],
@@ -286,7 +304,7 @@ async def fix(req: FixRequest) -> JSONResponse:
         return JSONResponse({
             "applied": False,
             "app_id": req.app_id,
-            "direction": req.direction,
+            "target": req.target,
             "files": [],
             "targets": targets,
             "skipped": plan["skipped"],
@@ -332,11 +350,11 @@ async def fix(req: FixRequest) -> JSONResponse:
         raise HTTPException(status_code=500, detail=f"write failed, rolled back: {exc}")
 
     after = p_grade_workspace(ws)
-    debug(f"drift {req.direction} {req.app_id}: {graded['passed']}/{graded['applicable']} -> {after['passed']}/{after['applicable']}")
+    debug(f"drift {req.target} {req.app_id}: {graded['passed']}/{graded['applicable']} -> {after['passed']}/{after['applicable']}")
     return JSONResponse({
         "applied": True,
         "app_id": req.app_id,
-        "direction": req.direction,
+        "target": req.target,
         "files": files,
         "targets": targets,
         "skipped": plan["skipped"],

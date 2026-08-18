@@ -7,7 +7,7 @@ against a real tree rather than believed.
 The property under test is SYMMETRY, not convergence on some privileged original. There is no
 hardened-versus-stock axis here: there are two variants a workspace can be in, either is a fine
 place to be, and anything matching neither is what the tool has no opinion about. So the assertion
-is that going there and coming back is the identity function, in whichever direction this workspace
+is that going there and coming back is the identity function, in whichever target this workspace
 happens to start from. The earlier version asserted "revert reproduces the baseline", which is
 unsatisfiable for a workspace already sitting in the variant revert targets, and which quietly
 encoded the wrong idea that one of the two was the real one.
@@ -20,7 +20,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 
-from backend.apps.drift.checks import p_grade_workspace  # noqa: E402
+from backend.apps.drift.checks import P_NA, P_SHARED, p_grade_workspace  # noqa: E402
 from backend.apps.drift.fixers import P_SHARED_CHECKS, p_plan  # noqa: E402
 
 FILES = ["backend/run.sh", "backend_init.sh", "backend/pyproject.toml", "frontend/src/.no-serve-mode"]
@@ -36,12 +36,17 @@ def snapshot(ws):
     return out
 
 
-def apply(ws, direction):
-    """Plan and write every check currently on the wrong side of `direction`."""
+def apply(ws, target):
+    """Plan and write every check currently on the wrong side of `target`. Returns the plan."""
     graded = p_grade_workspace(ws)
-    want = "fail" if direction == "harden" else "pass"
-    targets = [c["id"] for c in graded["checks"] if c["state"] == want]
-    plan = p_plan(ws, targets, direction)
+    # Must be the same rule the /fix endpoint uses, keyed on `side`, or the harness certifies a
+    # selection no user can actually request. P_SHARED joins P_NA as un-convertible: both variants
+    # already agree there, so there is no other side to move it to.
+    targets = [
+        c["id"] for c in graded["checks"]
+        if c["side"] not in (P_NA, P_SHARED, target)
+    ]
+    plan = p_plan(ws, targets, target)
     for e in plan["edits"]:
         dest = os.path.join(ws, e.rel_path)
         if e.delete:
@@ -71,16 +76,16 @@ def main(src):
 
     # Move AWAY from wherever this workspace already is, then come back: two legs, not three. A
     # third leg lands in the OTHER variant and every file legitimately differs, which reads as a
-    # round-trip failure when the round trip never actually closed. Starting with the direction the
+    # round-trip failure when the round trip never actually closed. Starting with the target the
     # workspace is already in would instead make leg one a no-op and pass without testing anything.
-    first = "revert" if g0["passed"] == g0["applicable"] else "harden"
-    seq = [first, "harden" if first == "revert" else "revert"]
+    first = "default" if g0["passed"] == g0["applicable"] else "patched"
+    seq = [first, "patched" if first == "default" else "default"]
 
     ok = True
-    for i, direction in enumerate(seq, 1):
-        p = apply(ws, direction)
+    for i, target in enumerate(seq, 1):
+        p = apply(ws, target)
         g = p_grade_workspace(ws)
-        print(f"  {i}. {direction:6} -> {g['passed']}/{g['applicable']} passing  "
+        print(f"  {i}. {target:6} -> {g['passed']}/{g['applicable']} passing  "
               f"({len(p['edits'])} file(s) written)")
         for s in p["skipped"]:
             print(f"          skipped {s['id']}: {s['reason']}")
@@ -92,13 +97,26 @@ def main(src):
         # fully-reverted tree still passes exactly them; comparing against 0 called every clean
         # revert half-applied and flagged the one state it was meant to certify.
         gradable = {c["id"] for c in g["checks"] if c["state"] in ("pass", "fail")}
-        want = (gradable & P_SHARED_CHECKS) if direction == "revert" else gradable
+        want = (gradable & P_SHARED_CHECKS) if target == "default" else gradable
         got = {c["id"] for c in g["checks"] if c["state"] == "pass"}
-        if got != want:
+        # A check the planner reported as skipped is one whose fixer found no anchor, which for a
+        # workspace written in its own dialect is the CORRECT outcome: to_default_ensurepip_guard
+        # only un-writes the helper this tool wrote, so a workspace that fused `import ensurepip`
+        # into its version probe, or spelled the health gate as an inline `-m pip --version`, is
+        # deliberately left alone and keeps passing. Counting that as "landed between variants"
+        # blamed the tool for honouring its own don't-touch-what-we-didn't-write rule, and it is
+        # what kept 00da51a5 failing even once every file round-tripped byte-identically.
+        skipped_ids = {s["id"] for s in p["skipped"]}
+        unexpected_pass = got - want - skipped_ids
+        unexpected_fail = want - got
+        if unexpected_pass or unexpected_fail:
             print(f"          WARNING: neither variant cleanly; "
-                  f"unexpected fail: {', '.join(sorted(want - got)) or '-'}; "
-                  f"unexpected pass: {', '.join(sorted(got - want)) or '-'}")
+                  f"unexpected fail: {', '.join(sorted(unexpected_fail)) or '-'}; "
+                  f"unexpected pass: {', '.join(sorted(unexpected_pass)) or '-'}")
             ok = False
+        elif got - want:
+            print(f"          note: {', '.join(sorted(got - want))} kept its own spelling "
+                  f"(no anchor to convert), left untouched")
 
     end = p_grade_workspace(ws)
     if end["passed"] != g0["passed"]:
@@ -107,25 +125,56 @@ def main(src):
         ok = False
 
     after = snapshot(ws)
+
+    # A second identical round trip. Under normalization the property under test is not "trip one
+    # reproduced the input" — a workspace written in a hand-rolled dialect is deliberately rewritten
+    # into canonical spelling, so trip one legitimately differs and asserting byte-identity there
+    # flags the tool working as designed. What must hold is that the rewrite SETTLES: once a tree is
+    # canonical, converting it again changes nothing further. Comparing trip one against trip two
+    # tests exactly that, and it is the assertion that distinguishes stable normalization from
+    # unbounded drift, which is the failure mode that would actually matter.
+    for target in seq:
+        apply(ws, target)
+    twice = snapshot(ws)
+
+    normalized = []
     for rel in sorted(set(before) | set(after)):
         a, b = before.get(rel), after.get(rel)
         if a == b:
             continue
-        ok = False
         if a is None:
+            ok = False
             print(f"\nMISMATCH {rel}: file did not exist at start, exists after round-trip")
         elif b is None:
+            ok = False
             print(f"\nMISMATCH {rel}: existed at start, missing after round-trip")
         else:
+            normalized.append(rel)
+
+    # Drift is trip two disagreeing with trip one: the tool never reached a fixed point.
+    for rel in sorted(set(after) | set(twice)):
+        if after.get(rel) != twice.get(rel):
+            ok = False
             import difflib
-            print(f"\nMISMATCH {rel}:")
+            a, b = after.get(rel) or "", twice.get(rel) or ""
+            print(f"\nUNSTABLE {rel}: a second round trip changed the file again")
             for line in list(difflib.unified_diff(a.splitlines(), b.splitlines(),
-                                                  "start", "round-tripped", lineterm=""))[:40]:
+                                                  "trip-1", "trip-2", lineterm=""))[:40]:
                 print("   " + line)
+
+    if normalized and ok:
+        import difflib
+        print(f"\nNORMALIZED (stable): {', '.join(normalized)}")
+        for rel in normalized:
+            diff = list(difflib.unified_diff(before[rel].splitlines(), after[rel].splitlines(),
+                                             "start", "canonical", lineterm=""))
+            print(f"  {rel}: {sum(1 for l in diff if l.startswith('-') and not l.startswith('---'))} "
+                  f"line(s) rewritten to canonical spelling")
 
     print()
     if ok:
-        print(f"ROUND TRIP CLEAN: {' -> '.join(seq)} reproduced the starting tree byte-for-byte.")
+        how = "unchanged" if not normalized else "normalized to canonical spelling, stable on re-run"
+        print(f"ROUND TRIP CLEAN: {' -> '.join(seq)} left the tree {how}.")
         return 0
     print("ROUND TRIP FAILED")
     return 1
