@@ -13,9 +13,6 @@ build/
 .venv/
 __pycache__/
 *.pyc
-
-.env
-.env.local
 # <<< openswarm-managed <<<
 
 .DS_Store
