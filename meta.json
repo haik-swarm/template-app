@@ -1,4 +1,5 @@
 {
   "name": "Template App",
-  "description": "A bare scaffold app kept at its initial state, with the backend initialized, to serve as a reference template."
+  "description": "A bare scaffold app kept at its initial state, with the backend initialized, to serve as a reference template.",
+  "icon": "view_quilt"
 }
