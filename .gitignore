@@ -13,6 +13,7 @@ build/
 .venv/
 __pycache__/
 *.pyc
+/frontend/.vite-cache/
 # <<< openswarm-managed <<<
 
 .DS_Store
